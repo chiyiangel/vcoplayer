@@ -100,6 +100,39 @@ h2 {
   font-size: 0.98rem;
 }
 
+.field-row {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.field-row span {
+  color: #607080;
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.field-row select {
+  min-height: 42px;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #b7c2cf;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #18202a;
+  font: inherit;
+  padding: 0 12px;
+}
+
+.field-row select:disabled {
+  background: #f3f6f8;
+  color: #687887;
+}
+
+.device-alert {
+  padding-top: 2px;
+}
+
 .playback-list {
   margin: 12px 0 0;
   padding-left: 22px;

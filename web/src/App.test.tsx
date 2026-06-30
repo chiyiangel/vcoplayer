@@ -7,7 +7,7 @@ type MockPlayerStatus = {
   playbackState: 'idle'
   nowPlaying: null
   playbackList: { itemId: string; path: string }[]
-  selectedOutputDevice: null
+  selectedOutputDevice: { id: string; name: string } | null
   failureReason: null
   runtimeInfo: {
     musicLibraryRoot: string
@@ -22,6 +22,11 @@ type MockLibraryDirectory = {
   files: { name: string; path: string }[]
 }
 
+type MockOutputDevice = {
+  id: string
+  name: string
+}
+
 const idleStatus: MockPlayerStatus = {
   playbackState: 'idle',
   nowPlaying: null,
@@ -33,6 +38,16 @@ const idleStatus: MockPlayerStatus = {
     serverHost: '127.0.0.1',
     serverPort: 8080,
   },
+}
+
+const outputDevices: MockOutputDevice[] = [
+  { id: 'coreaudio:41', name: 'USB DAC' },
+  { id: 'coreaudio:55', name: 'Built-in Output' },
+]
+
+const statusWithOutputDevice: MockPlayerStatus = {
+  ...idleStatus,
+  selectedOutputDevice: outputDevices[0],
 }
 
 const statusWithIntro: MockPlayerStatus = {
@@ -58,15 +73,25 @@ const albumDirectory: MockLibraryDirectory = {
 }
 
 let currentRootDirectory: typeof rootDirectory
+let currentStatus: MockPlayerStatus
+let currentOutputDevices: MockOutputDevice[]
 
 describe('Operator Remote initial status', () => {
   beforeEach(() => {
     currentRootDirectory = rootDirectory
+    currentStatus = idleStatus
+    currentOutputDevices = outputDevices
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input)
-        let body: MockPlayerStatus | MockLibraryDirectory = idleStatus
+        let body: MockPlayerStatus | MockLibraryDirectory | MockOutputDevice[] = currentStatus
+        if (url === '/api/devices') {
+          body = currentOutputDevices
+        }
+        if (url === '/api/devices/select' && init?.method === 'POST') {
+          body = statusWithOutputDevice
+        }
         if (url === '/api/playback-list/files' && init?.method === 'POST') {
           body = statusWithIntro
         }
@@ -99,9 +124,48 @@ describe('Operator Remote initial status', () => {
     expect(screen.getByRole('button', { name: '资料库' })).toBeTruthy()
     expect(screen.getByText('空闲')).toBeTruthy()
     expect(screen.getByText('播放列表为空')).toBeTruthy()
-    expect(screen.getByText('未选择输出设备')).toBeTruthy()
+    expect(screen.getByLabelText('当前输出设备').textContent).toBe('未选择输出设备')
     expect(screen.getByText('/Users/me/Music')).toBeTruthy()
     expect(fetch).toHaveBeenCalledWith('/api/status')
+  })
+
+  test('lists and selects Playback Output Devices from the Remote API', async () => {
+    const user = userEvent.setup()
+
+    render(<App />)
+
+    expect((await screen.findByLabelText('当前输出设备')).textContent).toBe('未选择输出设备')
+    await user.selectOptions(await screen.findByRole('combobox', { name: '输出设备' }), 'coreaudio:41')
+
+    expect(screen.getByLabelText('当前输出设备').textContent).toBe('USB DAC')
+    expect(fetch).toHaveBeenCalledWith('/api/devices')
+    expect(fetch).toHaveBeenCalledWith('/api/devices/select', {
+      method: 'POST',
+      body: JSON.stringify({ deviceId: 'coreaudio:41' }),
+    })
+  })
+
+  test('shows a missing Playback Output Device state for unavailable selected devices', async () => {
+    currentStatus = {
+      ...idleStatus,
+      selectedOutputDevice: { id: 'coreaudio:missing', name: 'Studio DAC' },
+    }
+
+    render(<App />)
+
+    expect((await screen.findByLabelText('当前输出设备')).textContent).toBe('Studio DAC')
+    expect(screen.getByLabelText('输出设备缺失状态').textContent).toBe('已选择的输出设备不在当前设备列表中')
+    expect(screen.getByRole('combobox', { name: '输出设备' })).toBeTruthy()
+  })
+
+  test('shows a missing Playback Output Device state when no output devices are selectable', async () => {
+    currentOutputDevices = []
+
+    render(<App />)
+
+    expect((await screen.findByLabelText('当前输出设备')).textContent).toBe('未选择输出设备')
+    expect(screen.getByLabelText('输出设备缺失状态').textContent).toBe('未发现输出设备')
+    expect((screen.getByRole('combobox', { name: '输出设备' }) as HTMLSelectElement).disabled).toBe(true)
   })
 
   test('renders the Library Browser root from the Remote API', async () => {
