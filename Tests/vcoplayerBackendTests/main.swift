@@ -30,6 +30,7 @@ struct StubOutputDeviceProvider: OutputDeviceProviding {
 actor StubPlaybackController: PlaybackControlling {
     private var startResults: [PlaybackStartResult]
     private let pauseResult: PlaybackPauseResult
+    private var capturedStartRequests: [PlaybackStartRequest] = []
 
     init(
         startResults: [PlaybackStartResult],
@@ -40,7 +41,8 @@ actor StubPlaybackController: PlaybackControlling {
     }
 
     func start(_ request: PlaybackStartRequest) async -> PlaybackStartResult {
-        self.startResults.isEmpty
+        self.capturedStartRequests.append(request)
+        return self.startResults.isEmpty
             ? .playing(PlaybackProgress(elapsedSeconds: 0, durationSeconds: nil))
             : self.startResults.removeFirst()
     }
@@ -50,6 +52,10 @@ actor StubPlaybackController: PlaybackControlling {
     }
 
     func stop() async {}
+
+    func startRequests() -> [PlaybackStartRequest] {
+        self.capturedStartRequests
+    }
 }
 
 @main
@@ -74,6 +80,14 @@ struct BackendTestRunner {
             print("PASS unsupportedPlaybackStaysOnFailedEntryUntilManualNext")
             try await pauseCommandRetainsNowPlayingDeviceAndProgressThenPlayResumes()
             print("PASS pauseCommandRetainsNowPlayingDeviceAndProgressThenPlayResumes")
+            try await outputDeviceSwitchWhilePlayingRestartsNowPlayingOnSelectedDevice()
+            print("PASS outputDeviceSwitchWhilePlayingRestartsNowPlayingOnSelectedDevice")
+            try await outputDeviceSwitchFailureKeepsSelectedDeviceWithoutFallback()
+            print("PASS outputDeviceSwitchFailureKeepsSelectedDeviceWithoutFallback")
+            try await playCommandAfterUnsupportedRetriesNowPlayingOnCurrentDevice()
+            print("PASS playCommandAfterUnsupportedRetriesNowPlayingOnCurrentDevice")
+            try await manualNextAfterOutputDeviceSwitchFailureAttemptsFollowingEntry()
+            print("PASS manualNextAfterOutputDeviceSwitchFailureAttemptsFollowingEntry")
             try await playCommandReportsUnsupportedPlaybackWhenOutputDeviceIsMissing()
             print("PASS playCommandReportsUnsupportedPlaybackWhenOutputDeviceIsMissing")
             try await outputDeviceSelectionClearsMissingDeviceFailureBeforePlaybackStarts()
@@ -583,6 +597,275 @@ struct BackendTestRunner {
                 try expect(status.progress == PlaybackProgress(elapsedSeconds: 37, durationSeconds: 182.5), "expected Play Command to resume from retained position")
             }
         }
+    }
+
+    static func outputDeviceSwitchWhilePlayingRestartsNowPlayingOnSelectedDevice() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        try Data().write(to: libraryRoot.appendingPathComponent("Intro.flac"))
+        let firstDevice = OutputDevice(id: "coreaudio:41", name: "USB DAC")
+        let secondDevice = OutputDevice(id: "coreaudio:55", name: "Studio DAC")
+        let playbackController = StubPlaybackController(
+            startResults: [
+                .playing(PlaybackProgress(elapsedSeconds: 37, durationSeconds: 182.5)),
+                .playing(PlaybackProgress(elapsedSeconds: 0, durationSeconds: 182.5)),
+            ]
+        )
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0,
+            outputDeviceProvider: StubOutputDeviceProvider(devices: [firstDevice, secondDevice]),
+            playbackController: playbackController
+        )
+
+        try await app.test(.router) { client in
+            try await client.execute(
+                uri: "/api/playback-list/files",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"path":"Intro.flac"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected file add to succeed")
+            }
+            try await client.execute(
+                uri: "/api/devices/select",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"deviceId":"coreaudio:41"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected first device select to succeed")
+            }
+            try await client.execute(uri: "/api/play", method: .post) { response in
+                try expect(response.status == .ok, "expected Play Command to start current entry")
+            }
+
+            try await client.execute(
+                uri: "/api/devices/select",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"deviceId":"coreaudio:55"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected Output Device Switch to be represented as PlayerStatus")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackState == .playing, "expected Output Device Switch to keep playing when supported")
+                try expect(status.nowPlaying == "Intro.flac", "expected Output Device Switch to retain Now Playing")
+                try expect(status.selectedOutputDevice == secondDevice, "expected Output Device Switch to select the new device")
+                try expect(status.progress == PlaybackProgress(elapsedSeconds: 0, durationSeconds: 182.5), "expected Output Device Switch to restart current file from the beginning")
+                try expect(status.failureReason == nil, "expected successful Output Device Switch to clear Playback Failure Reason")
+            }
+        }
+
+        let startRequests = await playbackController.startRequests()
+        try expect(startRequests.map(\.outputDevice) == [firstDevice, secondDevice], "expected playback to restart on the selected Output Device")
+        try expect(startRequests.map(\.relativePath) == ["Intro.flac", "Intro.flac"], "expected Output Device Switch to restart retained Now Playing")
+        try expect(startRequests[1].resumeAtSeconds == nil, "expected Output Device Switch to restart from the beginning")
+    }
+
+    static func outputDeviceSwitchFailureKeepsSelectedDeviceWithoutFallback() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        try Data().write(to: libraryRoot.appendingPathComponent("Intro.flac"))
+        let firstDevice = OutputDevice(id: "coreaudio:41", name: "USB DAC")
+        let busyDevice = OutputDevice(id: "coreaudio:99", name: "Busy DAC")
+        let failureReason = "Unsupported Playback: selected output device is busy."
+        let playbackController = StubPlaybackController(
+            startResults: [
+                .playing(PlaybackProgress(elapsedSeconds: 37, durationSeconds: 182.5)),
+                .unsupported(failureReason),
+            ]
+        )
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0,
+            outputDeviceProvider: StubOutputDeviceProvider(devices: [firstDevice, busyDevice]),
+            playbackController: playbackController
+        )
+
+        try await app.test(.router) { client in
+            try await client.execute(
+                uri: "/api/playback-list/files",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"path":"Intro.flac"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected file add to succeed")
+            }
+            try await client.execute(
+                uri: "/api/devices/select",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"deviceId":"coreaudio:41"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected first device select to succeed")
+            }
+            try await client.execute(uri: "/api/play", method: .post) { response in
+                try expect(response.status == .ok, "expected Play Command to start current entry")
+            }
+
+            try await client.execute(
+                uri: "/api/devices/select",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"deviceId":"coreaudio:99"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected unsupported Output Device Switch to be represented as PlayerStatus")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackState == .unsupported, "expected unsupported Output Device Switch to enter Unsupported Playback")
+                try expect(status.nowPlaying == "Intro.flac", "expected unsupported Output Device Switch to retain Now Playing")
+                try expect(status.selectedOutputDevice == busyDevice, "expected unsupported Output Device Switch to keep the selected busy device")
+                try expect(status.progress == nil, "expected unsupported Output Device Switch to clear progress")
+                try expect(status.failureReason == failureReason, "expected unsupported Output Device Switch to expose Playback Failure Reason")
+            }
+        }
+
+        let startRequests = await playbackController.startRequests()
+        try expect(startRequests.map(\.outputDevice) == [firstDevice, busyDevice], "expected no automatic fallback to the previous Output Device")
+    }
+
+    static func playCommandAfterUnsupportedRetriesNowPlayingOnCurrentDevice() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        try Data().write(to: libraryRoot.appendingPathComponent("Intro.flac"))
+        let firstDevice = OutputDevice(id: "coreaudio:41", name: "USB DAC")
+        let busyDevice = OutputDevice(id: "coreaudio:99", name: "Busy DAC")
+        let retryDevice = OutputDevice(id: "coreaudio:55", name: "Studio DAC")
+        let playbackController = StubPlaybackController(
+            startResults: [
+                .playing(PlaybackProgress(elapsedSeconds: 37, durationSeconds: 182.5)),
+                .unsupported("Unsupported Playback: selected output device is busy."),
+                .playing(PlaybackProgress(elapsedSeconds: 0, durationSeconds: 182.5)),
+            ]
+        )
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0,
+            outputDeviceProvider: StubOutputDeviceProvider(devices: [firstDevice, busyDevice, retryDevice]),
+            playbackController: playbackController
+        )
+
+        try await app.test(.router) { client in
+            try await client.execute(
+                uri: "/api/playback-list/files",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"path":"Intro.flac"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected file add to succeed")
+            }
+            for deviceID in ["coreaudio:41", "coreaudio:99", "coreaudio:55"] {
+                if deviceID == "coreaudio:41" {
+                    try await client.execute(
+                        uri: "/api/devices/select",
+                        method: .post,
+                        body: ByteBufferAllocator().buffer(string: #"{"deviceId":"\#(deviceID)"}"#)
+                    ) { response in
+                        try expect(response.status == .ok, "expected first device select to succeed")
+                    }
+                    try await client.execute(uri: "/api/play", method: .post) { response in
+                        try expect(response.status == .ok, "expected Play Command to start current entry")
+                    }
+                } else {
+                    try await client.execute(
+                        uri: "/api/devices/select",
+                        method: .post,
+                        body: ByteBufferAllocator().buffer(string: #"{"deviceId":"\#(deviceID)"}"#)
+                    ) { response in
+                        try expect(response.status == .ok, "expected device select to return PlayerStatus")
+                    }
+                }
+            }
+
+            try await client.execute(uri: "/api/play", method: .post) { response in
+                try expect(response.status == .ok, "expected Play Command retry after Unsupported Playback")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackState == .playing, "expected Play Command retry to enter playing")
+                try expect(status.nowPlaying == "Intro.flac", "expected Play Command retry to keep retained Now Playing")
+                try expect(status.selectedOutputDevice == retryDevice, "expected Play Command retry to use currently selected device")
+                try expect(status.progress == PlaybackProgress(elapsedSeconds: 0, durationSeconds: 182.5), "expected Play Command retry to start from the beginning")
+                try expect(status.failureReason == nil, "expected successful Play Command retry to clear Playback Failure Reason")
+            }
+        }
+
+        let startRequests = await playbackController.startRequests()
+        try expect(startRequests.map(\.outputDevice) == [firstDevice, busyDevice, retryDevice], "expected Play Command retry to use currently selected Output Device")
+        try expect(startRequests.map(\.relativePath) == ["Intro.flac", "Intro.flac", "Intro.flac"], "expected Play Command retry to keep retained Now Playing")
+    }
+
+    static func manualNextAfterOutputDeviceSwitchFailureAttemptsFollowingEntry() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        try Data().write(to: libraryRoot.appendingPathComponent("Intro.flac"))
+        try Data().write(to: libraryRoot.appendingPathComponent("Second.wav"))
+        let firstDevice = OutputDevice(id: "coreaudio:41", name: "USB DAC")
+        let busyDevice = OutputDevice(id: "coreaudio:99", name: "Busy DAC")
+        let playbackController = StubPlaybackController(
+            startResults: [
+                .playing(PlaybackProgress(elapsedSeconds: 37, durationSeconds: 182.5)),
+                .unsupported("Unsupported Playback: selected output device is busy."),
+                .playing(PlaybackProgress(elapsedSeconds: 0, durationSeconds: 205)),
+            ]
+        )
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0,
+            outputDeviceProvider: StubOutputDeviceProvider(devices: [firstDevice, busyDevice]),
+            playbackController: playbackController
+        )
+
+        try await app.test(.router) { client in
+            for path in ["Intro.flac", "Second.wav"] {
+                try await client.execute(
+                    uri: "/api/playback-list/files",
+                    method: .post,
+                    body: ByteBufferAllocator().buffer(string: #"{"path":"\#(path)"}"#)
+                ) { response in
+                    try expect(response.status == .ok, "expected file add to succeed")
+                }
+            }
+            try await client.execute(
+                uri: "/api/devices/select",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"deviceId":"coreaudio:41"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected first device select to succeed")
+            }
+            try await client.execute(uri: "/api/play", method: .post) { response in
+                try expect(response.status == .ok, "expected Play Command to start first entry")
+            }
+            try await client.execute(
+                uri: "/api/devices/select",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"deviceId":"coreaudio:99"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected unsupported Output Device Switch to return PlayerStatus")
+            }
+
+            try await client.execute(uri: "/api/next", method: .post) { response in
+                try expect(response.status == .ok, "expected manual Next after Output Device Switch failure to succeed")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackState == .playing, "expected manual Next after Output Device Switch failure to enter playing")
+                try expect(status.nowPlaying == "Second.wav", "expected manual Next after Output Device Switch failure to attempt following entry")
+                try expect(status.selectedOutputDevice == busyDevice, "expected manual Next to use currently selected device")
+                try expect(status.failureReason == nil, "expected successful manual Next to clear Playback Failure Reason")
+            }
+        }
+
+        let startRequests = await playbackController.startRequests()
+        try expect(startRequests.map(\.relativePath) == ["Intro.flac", "Intro.flac", "Second.wav"], "expected manual Next to attempt the following live Playback List entry")
+        try expect(startRequests.map(\.outputDevice) == [firstDevice, busyDevice, busyDevice], "expected manual Next to use the currently selected Output Device")
     }
 
     static func playCommandReportsUnsupportedPlaybackWhenOutputDeviceIsMissing() async throws {

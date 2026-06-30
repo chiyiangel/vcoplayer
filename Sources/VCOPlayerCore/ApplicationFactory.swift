@@ -184,7 +184,11 @@ public func buildApplication(
                 )
             }
             return PlaybackListMutationResponse.status(
-                await playerState.selectOutputDevice(outputDevice)
+                await playerState.selectOutputDevice(
+                    outputDevice,
+                    libraryRoot: libraryRoot,
+                    playbackController: playbackController
+                )
             )
         }
     }
@@ -281,7 +285,11 @@ private actor PlayerStateStore {
         return self.status()
     }
 
-    func selectOutputDevice(_ outputDevice: OutputDevice) -> PlayerStatus {
+    func selectOutputDevice(
+        _ outputDevice: OutputDevice,
+        libraryRoot: URL,
+        playbackController: any PlaybackControlling
+    ) async -> PlayerStatus {
         self.selectedOutputDevice = outputDevice
         if self.playbackState == .unsupported,
            self.nowPlayingIndex == nil,
@@ -289,6 +297,17 @@ private actor PlayerStateStore {
             self.playbackState = .idle
             self.failureReason = nil
         }
+
+        if self.playbackState == .playing, let nowPlayingIndex = self.nowPlayingIndex {
+            return await self.startPlayback(
+                at: nowPlayingIndex,
+                libraryRoot: libraryRoot,
+                outputDevice: outputDevice,
+                playbackController: playbackController,
+                resumeAtSeconds: nil
+            )
+        }
+
         return self.status()
     }
 
