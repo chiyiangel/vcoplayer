@@ -143,7 +143,7 @@ For phone testing on the local network, run the Vite dev server with a LAN bind 
 
 ## Testing
 
-- Backend automated tests use XCTest for pure logic such as path safety, candidate-format filtering, Playback List identity, deletion/clear rules, and previous-command behavior.
+- Backend automated tests currently run through `swift run vcoplayerBackendTests` because the available Command Line Tools Swift installation does not include XCTest. These tests cover public behavior such as Remote API status, Music Library Root validation, and Server CLI parsing.
 - Frontend automated tests use Vitest for API client behavior, state logic, and key component interactions.
 - Real CoreAudio output, USB DAC behavior, Bit Perfect playback, device switching, and mobile layout are manually verified for the MVP.
 
