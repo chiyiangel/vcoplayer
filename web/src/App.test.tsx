@@ -66,6 +66,29 @@ const pausedStatus: MockPlayerStatus = {
   progress: { elapsedSeconds: 42, durationSeconds: 182.5 },
 }
 
+const navigationStatus: MockPlayerStatus = {
+  ...statusWithOutputDevice,
+  playbackState: 'playing',
+  nowPlaying: 'Intro.flac',
+  playbackList: [
+    { itemId: 'item-1', path: 'Intro.flac' },
+    { itemId: 'item-2', path: 'Second.wav' },
+  ],
+  progress: { elapsedSeconds: 2, durationSeconds: 182.5 },
+}
+
+const nextStatus: MockPlayerStatus = {
+  ...navigationStatus,
+  nowPlaying: 'Second.wav',
+  progress: { elapsedSeconds: 0, durationSeconds: 205 },
+}
+
+const previousStatus: MockPlayerStatus = {
+  ...navigationStatus,
+  nowPlaying: 'Intro.flac',
+  progress: { elapsedSeconds: 0, durationSeconds: 182.5 },
+}
+
 const unsupportedStatus: MockPlayerStatus = {
   ...statusWithOutputDevice,
   playbackState: 'unsupported',
@@ -122,6 +145,15 @@ describe('Operator Remote initial status', () => {
         }
         if (url === '/api/pause' && init?.method === 'POST') {
           body = pausedStatus
+        }
+        if (url === '/api/next' && init?.method === 'POST') {
+          body = nextStatus
+        }
+        if (url === '/api/previous' && init?.method === 'POST') {
+          body = previousStatus
+        }
+        if (url === '/api/playback-list/select' && init?.method === 'POST') {
+          body = nextStatus
         }
         if (url === '/api/playback-list/files' && init?.method === 'POST') {
           body = statusWithIntro
@@ -206,19 +238,57 @@ describe('Operator Remote initial status', () => {
     render(<App />)
 
     const controls = await screen.findByRole('region', { name: '播放控制' })
-    await user.click(within(controls).getByRole('button', { name: '播放' }))
+    const playButton = within(controls).getByRole('button', { name: '播放' })
+    const pauseButton = within(controls).getByRole('button', { name: '暂停' })
+    await user.click(playButton)
 
     expect(screen.getByText('播放中')).toBeTruthy()
     expect(screen.getByLabelText('当前曲目').textContent).toBe('Intro.flac')
     expect(screen.getByLabelText('已播放时间').textContent).toBe('00:37')
     expect(screen.getByLabelText('总时长').textContent).toBe('03:02')
+    expect(playButton.getAttribute('aria-pressed')).toBe('true')
+    expect(pauseButton.getAttribute('aria-pressed')).toBe('false')
+    expect(playButton.className).toBe('primary-action')
+    expect(pauseButton.className).toBe('secondary-action')
     expect(fetch).toHaveBeenCalledWith('/api/play', { method: 'POST' })
 
-    await user.click(within(controls).getByRole('button', { name: '暂停' }))
+    await user.click(pauseButton)
 
     expect(screen.getByText('已暂停')).toBeTruthy()
     expect(screen.getByLabelText('已播放时间').textContent).toBe('00:42')
+    expect(playButton.getAttribute('aria-pressed')).toBe('false')
+    expect(pauseButton.getAttribute('aria-pressed')).toBe('true')
+    expect(playButton.className).toBe('secondary-action')
+    expect(pauseButton.className).toBe('primary-action')
     expect(fetch).toHaveBeenCalledWith('/api/pause', { method: 'POST' })
+  })
+
+  test('exposes next previous and Playback List Selection actions', async () => {
+    const user = userEvent.setup()
+    currentStatus = navigationStatus
+
+    render(<App />)
+
+    const controls = await screen.findByRole('region', { name: '播放控制' })
+    await user.click(within(controls).getByRole('button', { name: '下一首' }))
+
+    expect(screen.getByLabelText('当前曲目').textContent).toBe('Second.wav')
+    expect(screen.getByLabelText('已播放时间').textContent).toBe('00:00')
+    expect(fetch).toHaveBeenCalledWith('/api/next', { method: 'POST' })
+
+    await user.click(within(controls).getByRole('button', { name: '上一首' }))
+
+    expect(screen.getByLabelText('当前曲目').textContent).toBe('Intro.flac')
+    expect(fetch).toHaveBeenCalledWith('/api/previous', { method: 'POST' })
+
+    const playbackList = screen.getByRole('region', { name: '播放列表' })
+    await user.click(within(playbackList).getByRole('button', { name: '播放 Second.wav' }))
+
+    expect(screen.getByLabelText('当前曲目').textContent).toBe('Second.wav')
+    expect(fetch).toHaveBeenCalledWith('/api/playback-list/select', {
+      method: 'POST',
+      body: JSON.stringify({ itemId: 'item-2' }),
+    })
   })
 
   test('shows unknown duration and Playback Failure Reason from PlayerStatus', async () => {

@@ -131,7 +131,7 @@ h2 {
 
 .transport-actions {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -178,11 +178,38 @@ h2 {
 
 .playback-list {
   margin: 12px 0 0;
-  padding-left: 22px;
+  padding: 0;
+  list-style: none;
+  counter-reset: playback-list;
+}
+
+.playback-list li {
+  display: grid;
+  grid-template-columns: 2ch minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px 0;
+}
+
+.playback-list li::before {
+  counter-increment: playback-list;
+  content: counter(playback-list);
+  color: #607080;
+  font-variant-numeric: tabular-nums;
 }
 
 .playback-list li + li {
   margin-top: 8px;
+}
+
+.playback-list li span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.playback-list .active span {
+  font-weight: 700;
 }
 
 .panel-actions {

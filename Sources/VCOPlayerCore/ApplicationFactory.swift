@@ -47,6 +47,7 @@ public struct RequestError: ResponseCodable, Equatable, Sendable {
 }
 
 private let missingOutputDeviceFailureReason = "Playback requires a selected Playback Output Device."
+private let previousCommandRestartThresholdSeconds = 3.0
 
 public enum MusicLibraryRootError: Error, CustomStringConvertible, Equatable {
     case notDirectory(String)
@@ -88,6 +89,16 @@ public func buildApplication(
         Post("/api/pause") { _, _ in
             PlaybackListMutationResponse.status(
                 await playerState.pause(playbackController: playbackController)
+            )
+        }
+        Post("/api/next") { _, _ in
+            PlaybackListMutationResponse.status(
+                await playerState.next(libraryRoot: libraryRoot, playbackController: playbackController)
+            )
+        }
+        Post("/api/previous") { _, _ in
+            PlaybackListMutationResponse.status(
+                await playerState.previous(libraryRoot: libraryRoot, playbackController: playbackController)
             )
         }
         Get("/api/devices") { _, _ in
@@ -140,6 +151,16 @@ public func buildApplication(
                 )
             }
         }
+        Post("/api/playback-list/select") { request, context in
+            let selectionRequest = try await request.decode(as: PlaybackListSelectionRequest.self, context: context)
+            return PlaybackListMutationResponse.status(
+                await playerState.selectPlaybackListItem(
+                    itemID: selectionRequest.itemId,
+                    libraryRoot: libraryRoot,
+                    playbackController: playbackController
+                )
+            )
+        }
         Post("/api/devices/select") { request, context in
             let selectionRequest = try await request.decode(as: OutputDeviceSelectionRequest.self, context: context)
             guard let outputDevice = try outputDeviceProvider.outputDevices().first(where: { $0.id == selectionRequest.deviceId }) else {
@@ -171,6 +192,10 @@ private struct LibraryPathRequest: Decodable {
 
 private struct OutputDeviceSelectionRequest: Decodable {
     let deviceId: String
+}
+
+private struct PlaybackListSelectionRequest: Decodable {
+    let itemId: String
 }
 
 private actor PlayerStateStore {
@@ -233,8 +258,99 @@ private actor PlayerStateStore {
         }
 
         let playbackIndex = self.nowPlayingIndex ?? 0
-        let item = self.playbackList[playbackIndex]
         let resumeAtSeconds = self.playbackState == .paused ? self.progress?.elapsedSeconds : nil
+        return await self.startPlayback(
+            at: playbackIndex,
+            libraryRoot: libraryRoot,
+            outputDevice: outputDevice,
+            playbackController: playbackController,
+            resumeAtSeconds: resumeAtSeconds
+        )
+    }
+
+    func next(libraryRoot: URL, playbackController: any PlaybackControlling) async -> PlayerStatus {
+        guard let outputDevice = self.selectedOutputDevice else {
+            self.playbackState = .unsupported
+            self.failureReason = missingOutputDeviceFailureReason
+            return self.status()
+        }
+        guard let nowPlayingIndex = self.nowPlayingIndex else {
+            return await self.play(libraryRoot: libraryRoot, playbackController: playbackController)
+        }
+
+        let nextIndex = nowPlayingIndex + 1
+        guard self.playbackList.indices.contains(nextIndex) else {
+            await playbackController.stop()
+            self.playbackState = .stopped
+            self.progress = nil
+            self.failureReason = nil
+            return self.status()
+        }
+
+        return await self.startPlayback(
+            at: nextIndex,
+            libraryRoot: libraryRoot,
+            outputDevice: outputDevice,
+            playbackController: playbackController,
+            resumeAtSeconds: nil
+        )
+    }
+
+    func previous(libraryRoot: URL, playbackController: any PlaybackControlling) async -> PlayerStatus {
+        guard let outputDevice = self.selectedOutputDevice else {
+            self.playbackState = .unsupported
+            self.failureReason = missingOutputDeviceFailureReason
+            return self.status()
+        }
+        guard let nowPlayingIndex = self.nowPlayingIndex else {
+            return await self.play(libraryRoot: libraryRoot, playbackController: playbackController)
+        }
+
+        let elapsedSeconds = self.progress?.elapsedSeconds ?? 0
+        let targetIndex = elapsedSeconds < previousCommandRestartThresholdSeconds && nowPlayingIndex > 0
+            ? nowPlayingIndex - 1
+            : nowPlayingIndex
+
+        return await self.startPlayback(
+            at: targetIndex,
+            libraryRoot: libraryRoot,
+            outputDevice: outputDevice,
+            playbackController: playbackController,
+            resumeAtSeconds: nil
+        )
+    }
+
+    func selectPlaybackListItem(
+        itemID: String,
+        libraryRoot: URL,
+        playbackController: any PlaybackControlling
+    ) async -> PlayerStatus {
+        guard let outputDevice = self.selectedOutputDevice else {
+            self.playbackState = .unsupported
+            self.failureReason = missingOutputDeviceFailureReason
+            return self.status()
+        }
+        guard let playbackIndex = self.playbackList.firstIndex(where: { $0.itemId == itemID }) else {
+            return self.status()
+        }
+
+        return await self.startPlayback(
+            at: playbackIndex,
+            libraryRoot: libraryRoot,
+            outputDevice: outputDevice,
+            playbackController: playbackController,
+            resumeAtSeconds: nil
+        )
+    }
+
+    private func startPlayback(
+        at playbackIndex: Int,
+        libraryRoot: URL,
+        outputDevice: OutputDevice,
+        playbackController: any PlaybackControlling,
+        resumeAtSeconds: Double?
+    ) async -> PlayerStatus {
+        let item = self.playbackList[playbackIndex]
         let result = await playbackController.start(
             PlaybackStartRequest(
                 fileURL: libraryRoot.appendingPathComponent(item.path),

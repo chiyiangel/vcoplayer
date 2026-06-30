@@ -48,6 +48,8 @@ actor StubPlaybackController: PlaybackControlling {
     func pause() async -> PlaybackPauseResult {
         self.pauseResult
     }
+
+    func stop() async {}
 }
 
 @main
@@ -58,6 +60,18 @@ struct BackendTestRunner {
             print("PASS statusReturnsIdlePlayerStatusForValidMusicLibraryRoot")
             try await playCommandStartsFirstPlaybackListEntryWhenIdleWithSelectedOutputDevice()
             print("PASS playCommandStartsFirstPlaybackListEntryWhenIdleWithSelectedOutputDevice")
+            try await nextCommandStartsNextPlaybackListEntry()
+            print("PASS nextCommandStartsNextPlaybackListEntry")
+            try await nextCommandAtPlaybackListEndStopsAndRetainsNowPlaying()
+            print("PASS nextCommandAtPlaybackListEndStopsAndRetainsNowPlaying")
+            try await previousCommandRestartsCurrentEntryAtThreeSecondsOrLater()
+            print("PASS previousCommandRestartsCurrentEntryAtThreeSecondsOrLater")
+            try await previousCommandMovesToPreviousEntryBeforeThreeSeconds()
+            print("PASS previousCommandMovesToPreviousEntryBeforeThreeSeconds")
+            try await playbackListSelectionStartsSelectedEntryFromBeginning()
+            print("PASS playbackListSelectionStartsSelectedEntryFromBeginning")
+            try await unsupportedPlaybackStaysOnFailedEntryUntilManualNext()
+            print("PASS unsupportedPlaybackStaysOnFailedEntryUntilManualNext")
             try await pauseCommandRetainsNowPlayingDeviceAndProgressThenPlayResumes()
             print("PASS pauseCommandRetainsNowPlayingDeviceAndProgressThenPlayResumes")
             try await playCommandReportsUnsupportedPlaybackWhenOutputDeviceIsMissing()
@@ -149,6 +163,348 @@ struct BackendTestRunner {
                 try expect(status.nowPlaying == "Intro.flac", "expected first Playback List entry to become Now Playing")
                 try expect(status.progress == PlaybackProgress(elapsedSeconds: 0, durationSeconds: 182.5), "expected read-only progress from playback path")
                 try expect(status.failureReason == nil, "expected successful Play Command to clear Playback Failure Reason")
+            }
+        }
+    }
+
+    static func nextCommandStartsNextPlaybackListEntry() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        try Data().write(to: libraryRoot.appendingPathComponent("Intro.flac"))
+        try Data().write(to: libraryRoot.appendingPathComponent("Second.wav"))
+        let outputDevice = OutputDevice(id: "coreaudio:41", name: "USB DAC")
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0,
+            outputDeviceProvider: StubOutputDeviceProvider(devices: [outputDevice]),
+            playbackController: StubPlaybackController(
+                startResults: [
+                    .playing(PlaybackProgress(elapsedSeconds: 0, durationSeconds: 182.5)),
+                    .playing(PlaybackProgress(elapsedSeconds: 0, durationSeconds: 205)),
+                ]
+            )
+        )
+
+        try await app.test(.router) { client in
+            try await client.execute(
+                uri: "/api/playback-list/files",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"path":"Intro.flac"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected initial file add to succeed")
+            }
+            try await client.execute(
+                uri: "/api/devices/select",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"deviceId":"coreaudio:41"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected device select to succeed")
+            }
+            try await client.execute(uri: "/api/play", method: .post) { response in
+                try expect(response.status == .ok, "expected Play Command to start first entry")
+            }
+            try await client.execute(
+                uri: "/api/playback-list/files",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"path":"Second.wav"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected live Playback List edit to succeed")
+            }
+
+            try await client.execute(uri: "/api/next", method: .post) { response in
+                try expect(response.status == .ok, "expected HTTP 200 from Next Command")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackState == .playing, "expected Next Command to keep playing")
+                try expect(status.nowPlaying == "Second.wav", "expected Next Command to move to next Playback List entry")
+                try expect(status.playbackList.map(\.path) == ["Intro.flac", "Second.wav"], "expected Next Command to retain the Playback List")
+                try expect(status.progress == PlaybackProgress(elapsedSeconds: 0, durationSeconds: 205), "expected Next Command to start the next entry from the beginning")
+                try expect(status.failureReason == nil, "expected successful Next Command to clear Playback Failure Reason")
+            }
+        }
+    }
+
+    static func nextCommandAtPlaybackListEndStopsAndRetainsNowPlaying() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        try Data().write(to: libraryRoot.appendingPathComponent("Only.flac"))
+        let outputDevice = OutputDevice(id: "coreaudio:41", name: "USB DAC")
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0,
+            outputDeviceProvider: StubOutputDeviceProvider(devices: [outputDevice]),
+            playbackController: StubPlaybackController(
+                startResults: [
+                    .playing(PlaybackProgress(elapsedSeconds: 0, durationSeconds: 182.5)),
+                ]
+            )
+        )
+
+        try await app.test(.router) { client in
+            try await client.execute(
+                uri: "/api/playback-list/files",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"path":"Only.flac"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected file add to succeed")
+            }
+            try await client.execute(
+                uri: "/api/devices/select",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"deviceId":"coreaudio:41"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected device select to succeed")
+            }
+            try await client.execute(uri: "/api/play", method: .post) { response in
+                try expect(response.status == .ok, "expected Play Command to start only entry")
+            }
+
+            try await client.execute(uri: "/api/next", method: .post) { response in
+                try expect(response.status == .ok, "expected HTTP 200 from Next Command at Playback List End")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackState == .stopped, "expected Next Command at Playback List End to stop playback")
+                try expect(status.nowPlaying == "Only.flac", "expected Playback List End to retain Now Playing")
+                try expect(status.playbackList.map(\.path) == ["Only.flac"], "expected Playback List End to retain the Playback List")
+                try expect(status.failureReason == nil, "expected Playback List End not to report Unsupported Playback")
+            }
+        }
+    }
+
+    static func previousCommandRestartsCurrentEntryAtThreeSecondsOrLater() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        try Data().write(to: libraryRoot.appendingPathComponent("Intro.flac"))
+        let outputDevice = OutputDevice(id: "coreaudio:41", name: "USB DAC")
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0,
+            outputDeviceProvider: StubOutputDeviceProvider(devices: [outputDevice]),
+            playbackController: StubPlaybackController(
+                startResults: [
+                    .playing(PlaybackProgress(elapsedSeconds: 3, durationSeconds: 182.5)),
+                    .playing(PlaybackProgress(elapsedSeconds: 0, durationSeconds: 182.5)),
+                ]
+            )
+        )
+
+        try await app.test(.router) { client in
+            try await client.execute(
+                uri: "/api/playback-list/files",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"path":"Intro.flac"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected file add to succeed")
+            }
+            try await client.execute(
+                uri: "/api/devices/select",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"deviceId":"coreaudio:41"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected device select to succeed")
+            }
+            try await client.execute(uri: "/api/play", method: .post) { response in
+                try expect(response.status == .ok, "expected Play Command to start current entry")
+            }
+
+            try await client.execute(uri: "/api/previous", method: .post) { response in
+                try expect(response.status == .ok, "expected HTTP 200 from Previous Command")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackState == .playing, "expected Previous Command to keep playing")
+                try expect(status.nowPlaying == "Intro.flac", "expected Previous Command at 3 seconds to restart current entry")
+                try expect(status.progress == PlaybackProgress(elapsedSeconds: 0, durationSeconds: 182.5), "expected Previous Command restart from the beginning")
+            }
+        }
+    }
+
+    static func previousCommandMovesToPreviousEntryBeforeThreeSeconds() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        try Data().write(to: libraryRoot.appendingPathComponent("Intro.flac"))
+        try Data().write(to: libraryRoot.appendingPathComponent("Second.wav"))
+        let outputDevice = OutputDevice(id: "coreaudio:41", name: "USB DAC")
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0,
+            outputDeviceProvider: StubOutputDeviceProvider(devices: [outputDevice]),
+            playbackController: StubPlaybackController(
+                startResults: [
+                    .playing(PlaybackProgress(elapsedSeconds: 0, durationSeconds: 182.5)),
+                    .playing(PlaybackProgress(elapsedSeconds: 2.5, durationSeconds: 205)),
+                    .playing(PlaybackProgress(elapsedSeconds: 0, durationSeconds: 182.5)),
+                ]
+            )
+        )
+
+        try await app.test(.router) { client in
+            for path in ["Intro.flac", "Second.wav"] {
+                try await client.execute(
+                    uri: "/api/playback-list/files",
+                    method: .post,
+                    body: ByteBufferAllocator().buffer(string: #"{"path":"\#(path)"}"#)
+                ) { response in
+                    try expect(response.status == .ok, "expected file add to succeed")
+                }
+            }
+            try await client.execute(
+                uri: "/api/devices/select",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"deviceId":"coreaudio:41"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected device select to succeed")
+            }
+            try await client.execute(uri: "/api/play", method: .post) { response in
+                try expect(response.status == .ok, "expected Play Command to start first entry")
+            }
+            try await client.execute(uri: "/api/next", method: .post) { response in
+                try expect(response.status == .ok, "expected Next Command to start second entry")
+            }
+
+            try await client.execute(uri: "/api/previous", method: .post) { response in
+                try expect(response.status == .ok, "expected HTTP 200 from Previous Command")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackState == .playing, "expected Previous Command to keep playing")
+                try expect(status.nowPlaying == "Intro.flac", "expected Previous Command before 3 seconds to move to previous Playback List entry")
+                try expect(status.progress == PlaybackProgress(elapsedSeconds: 0, durationSeconds: 182.5), "expected previous entry to start from the beginning")
+            }
+        }
+    }
+
+    static func playbackListSelectionStartsSelectedEntryFromBeginning() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        try Data().write(to: libraryRoot.appendingPathComponent("Intro.flac"))
+        try Data().write(to: libraryRoot.appendingPathComponent("Second.wav"))
+        let outputDevice = OutputDevice(id: "coreaudio:41", name: "USB DAC")
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0,
+            outputDeviceProvider: StubOutputDeviceProvider(devices: [outputDevice]),
+            playbackController: StubPlaybackController(
+                startResults: [
+                    .playing(PlaybackProgress(elapsedSeconds: 0, durationSeconds: 205)),
+                ]
+            )
+        )
+
+        try await app.test(.router) { client in
+            var selectedItemID = ""
+            for path in ["Intro.flac", "Second.wav"] {
+                try await client.execute(
+                    uri: "/api/playback-list/files",
+                    method: .post,
+                    body: ByteBufferAllocator().buffer(string: #"{"path":"\#(path)"}"#)
+                ) { response in
+                    try expect(response.status == .ok, "expected file add to succeed")
+
+                    let body = String(buffer: response.body)
+                    let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                    selectedItemID = status.playbackList.last?.itemId ?? ""
+                }
+            }
+            try await client.execute(
+                uri: "/api/devices/select",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"deviceId":"coreaudio:41"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected device select to succeed")
+            }
+
+            try await client.execute(
+                uri: "/api/playback-list/select",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"itemId":"\#(selectedItemID)"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected HTTP 200 from Playback List Selection")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackState == .playing, "expected Playback List Selection to start playback")
+                try expect(status.nowPlaying == "Second.wav", "expected selected Playback List entry to become Now Playing")
+                try expect(status.progress == PlaybackProgress(elapsedSeconds: 0, durationSeconds: 205), "expected selected entry to start from the beginning")
+            }
+        }
+    }
+
+    static func unsupportedPlaybackStaysOnFailedEntryUntilManualNext() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        try Data().write(to: libraryRoot.appendingPathComponent("Lossy.m4a"))
+        try Data().write(to: libraryRoot.appendingPathComponent("Good.flac"))
+        let outputDevice = OutputDevice(id: "coreaudio:41", name: "USB DAC")
+        let failureReason = "Unsupported Playback: lossy m4a content cannot preserve Bit Perfect Playback."
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0,
+            outputDeviceProvider: StubOutputDeviceProvider(devices: [outputDevice]),
+            playbackController: StubPlaybackController(
+                startResults: [
+                    .unsupported(failureReason),
+                    .playing(PlaybackProgress(elapsedSeconds: 0, durationSeconds: 182.5)),
+                ]
+            )
+        )
+
+        try await app.test(.router) { client in
+            for path in ["Lossy.m4a", "Good.flac"] {
+                try await client.execute(
+                    uri: "/api/playback-list/files",
+                    method: .post,
+                    body: ByteBufferAllocator().buffer(string: #"{"path":"\#(path)"}"#)
+                ) { response in
+                    try expect(response.status == .ok, "expected file add to succeed")
+                }
+            }
+            try await client.execute(
+                uri: "/api/devices/select",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"deviceId":"coreaudio:41"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected device select to succeed")
+            }
+
+            try await client.execute(uri: "/api/play", method: .post) { response in
+                try expect(response.status == .ok, "expected Unsupported Playback to be represented as PlayerStatus")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackState == .unsupported, "expected unsupported first entry not to be skipped")
+                try expect(status.nowPlaying == "Lossy.m4a", "expected failed entry to remain Now Playing")
+                try expect(status.failureReason == failureReason, "expected failed entry to expose Playback Failure Reason")
+            }
+
+            try await client.execute(uri: "/api/next", method: .post) { response in
+                try expect(response.status == .ok, "expected manual Next after Unsupported Playback to succeed")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackState == .playing, "expected manual Next to attempt the following entry")
+                try expect(status.nowPlaying == "Good.flac", "expected manual Next to move past the unsupported entry")
+                try expect(status.failureReason == nil, "expected successful manual Next to clear Playback Failure Reason")
             }
         }
     }
