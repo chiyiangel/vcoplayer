@@ -218,8 +218,10 @@ function App() {
         : null
   const isPlaying = status?.playbackState === 'playing'
   const isPaused = status?.playbackState === 'paused'
+  const isRetryableUnsupported = status?.playbackState === 'unsupported' && Boolean(status.nowPlaying)
   const playButtonClassName = isPlaying ? 'primary-action' : 'secondary-action'
   const pauseButtonClassName = isPaused ? 'primary-action' : 'secondary-action'
+  const playButtonText = isRetryableUnsupported ? '重试' : '播放'
 
   return (
     <main className="remote-shell">
@@ -283,7 +285,7 @@ function App() {
                   void play()
                 }}
               >
-                播放
+                {playButtonText}
               </button>
               <button
                 type="button"

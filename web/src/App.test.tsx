@@ -69,6 +69,20 @@ const pausedStatus: MockPlayerStatus = {
   progress: { elapsedSeconds: 42, durationSeconds: 182.5 },
 }
 
+const deviceSwitchStatus: MockPlayerStatus = {
+  ...playingStatus,
+  selectedOutputDevice: outputDevices[1],
+  progress: { elapsedSeconds: 0, durationSeconds: 182.5 },
+}
+
+const unsupportedDeviceSwitchStatus: MockPlayerStatus = {
+  ...playingStatus,
+  playbackState: 'unsupported',
+  selectedOutputDevice: outputDevices[1],
+  progress: null,
+  failureReason: 'Unsupported Playback: selected output device is busy.',
+}
+
 const navigationStatus: MockPlayerStatus = {
   ...statusWithOutputDevice,
   playbackState: 'playing',
@@ -140,12 +154,16 @@ const albumDirectory: MockLibraryDirectory = {
 let currentRootDirectory: typeof rootDirectory
 let currentStatus: MockPlayerStatus
 let currentOutputDevices: MockOutputDevice[]
+let currentDeviceSelectionStatus: MockPlayerStatus
+let currentPlayStatus: MockPlayerStatus
 
 describe('Operator Remote initial status', () => {
   beforeEach(() => {
     currentRootDirectory = rootDirectory
     currentStatus = idleStatus
     currentOutputDevices = outputDevices
+    currentDeviceSelectionStatus = statusWithOutputDevice
+    currentPlayStatus = playingStatus
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -155,10 +173,10 @@ describe('Operator Remote initial status', () => {
           body = currentOutputDevices
         }
         if (url === '/api/devices/select' && init?.method === 'POST') {
-          body = statusWithOutputDevice
+          body = currentDeviceSelectionStatus
         }
         if (url === '/api/play' && init?.method === 'POST') {
-          body = playingStatus
+          body = currentPlayStatus
         }
         if (url === '/api/pause' && init?.method === 'POST') {
           body = pausedStatus
@@ -230,6 +248,46 @@ describe('Operator Remote initial status', () => {
       method: 'POST',
       body: JSON.stringify({ deviceId: 'coreaudio:41' }),
     })
+  })
+
+  test('shows supported Output Device Switch outcome from the Remote API', async () => {
+    const user = userEvent.setup()
+    currentStatus = playingStatus
+    currentDeviceSelectionStatus = deviceSwitchStatus
+
+    render(<App />)
+
+    await user.selectOptions(await screen.findByRole('combobox', { name: '输出设备' }), 'coreaudio:55')
+
+    expect(screen.getByLabelText('当前输出设备').textContent).toBe('Built-in Output')
+    expect(screen.getByText('播放中')).toBeTruthy()
+    expect(screen.getByLabelText('当前曲目').textContent).toBe('Intro.flac')
+    expect(screen.getByLabelText('已播放时间').textContent).toBe('00:00')
+    expect(fetch).toHaveBeenCalledWith('/api/devices/select', {
+      method: 'POST',
+      body: JSON.stringify({ deviceId: 'coreaudio:55' }),
+    })
+  })
+
+  test('shows retryable Unsupported Playback after Output Device Switch failure', async () => {
+    const user = userEvent.setup()
+    currentStatus = unsupportedDeviceSwitchStatus
+    currentPlayStatus = deviceSwitchStatus
+
+    render(<App />)
+
+    expect(await screen.findByText('不支持')).toBeTruthy()
+    expect(screen.getByLabelText('当前输出设备').textContent).toBe('Built-in Output')
+    expect(screen.getByLabelText('当前曲目').textContent).toBe('Intro.flac')
+    expect(screen.getByText('Unsupported Playback: selected output device is busy.')).toBeTruthy()
+
+    const controls = screen.getByRole('region', { name: '播放控制' })
+    await user.click(within(controls).getByRole('button', { name: '重试' }))
+
+    expect(screen.getByText('播放中')).toBeTruthy()
+    expect(screen.getByLabelText('已播放时间').textContent).toBe('00:00')
+    expect(screen.getByLabelText('当前输出设备').textContent).toBe('Built-in Output')
+    expect(fetch).toHaveBeenCalledWith('/api/play', { method: 'POST' })
   })
 
   test('shows a missing Playback Output Device state for unavailable selected devices', async () => {
