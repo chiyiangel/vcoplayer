@@ -92,6 +92,16 @@ struct BackendTestRunner {
             print("PASS addCandidateMusicFileAppendsPlaybackListItem")
             try await addCandidateMusicFileCreatesDistinctRuntimeItemsForDuplicates()
             print("PASS addCandidateMusicFileCreatesDistinctRuntimeItemsForDuplicates")
+            try await deletePlaybackListItemRemovesOnlyThatRuntimeItemForDuplicatePaths()
+            print("PASS deletePlaybackListItemRemovesOnlyThatRuntimeItemForDuplicatePaths")
+            try await deletePlaybackListItemDoesNotRemoveActiveNowPlaying()
+            print("PASS deletePlaybackListItemDoesNotRemoveActiveNowPlaying")
+            try await clearPlaybackListWhenIdleRemovesEveryEntry()
+            print("PASS clearPlaybackListWhenIdleRemovesEveryEntry")
+            try await clearPlaybackListPreservesActiveNowPlaying()
+            print("PASS clearPlaybackListPreservesActiveNowPlaying")
+            try await deletingEarlierEntryPreservesNowPlayingNavigation()
+            print("PASS deletingEarlierEntryPreservesNowPlayingNavigation")
             try await folderAddAppendsNestedCandidateMusicFilesInStableRelativePathOrder()
             print("PASS folderAddAppendsNestedCandidateMusicFilesInStableRelativePathOrder")
             try await libraryBrowserReturnsRootFoldersAndCandidateMusicFiles()
@@ -442,6 +452,7 @@ struct BackendTestRunner {
                 let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
                 try expect(status.playbackState == .playing, "expected Playback List Selection to start playback")
                 try expect(status.nowPlaying == "Second.wav", "expected selected Playback List entry to become Now Playing")
+                try expect(status.nowPlayingItemId == selectedItemID, "expected selected runtime item identity to become Now Playing")
                 try expect(status.progress == PlaybackProgress(elapsedSeconds: 0, durationSeconds: 205), "expected selected entry to start from the beginning")
             }
         }
@@ -915,6 +926,303 @@ struct BackendTestRunner {
                 let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
                 try expect(status.playbackList.map(\.path) == ["Repeat.m4a", "Repeat.m4a"], "expected duplicate file paths to be retained")
                 try expect(status.playbackList[0].itemId != status.playbackList[1].itemId, "expected duplicate entries to have distinct runtime identities")
+            }
+        }
+    }
+
+    static func deletePlaybackListItemRemovesOnlyThatRuntimeItemForDuplicatePaths() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        try Data().write(to: libraryRoot.appendingPathComponent("Repeat.m4a"))
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0
+        )
+
+        try await app.test(.router) { client in
+            let body = #"{"path":"Repeat.m4a"}"#
+            try await client.execute(
+                uri: "/api/playback-list/files",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: body)
+            ) { response in
+                try expect(response.status == .ok, "expected first duplicate add to succeed")
+            }
+
+            var firstItemID = ""
+            var secondItemID = ""
+            try await client.execute(
+                uri: "/api/playback-list/files",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: body)
+            ) { response in
+                try expect(response.status == .ok, "expected second duplicate add to succeed")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                firstItemID = status.playbackList[0].itemId
+                secondItemID = status.playbackList[1].itemId
+            }
+
+            try await client.execute(
+                uri: "/api/playback-list/delete",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"itemId":"\#(secondItemID)"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected HTTP 200 from Playback List delete")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackList == [PlaybackListItem(itemId: firstItemID, path: "Repeat.m4a")], "expected delete to remove only the selected runtime item identity")
+                try expect(!status.playbackList.contains(where: { $0.itemId == secondItemID }), "expected deleted runtime item identity to be absent")
+            }
+        }
+    }
+
+    static func deletePlaybackListItemDoesNotRemoveActiveNowPlaying() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        try Data().write(to: libraryRoot.appendingPathComponent("Intro.flac"))
+        try Data().write(to: libraryRoot.appendingPathComponent("Second.wav"))
+        let outputDevice = OutputDevice(id: "coreaudio:41", name: "USB DAC")
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0,
+            outputDeviceProvider: StubOutputDeviceProvider(devices: [outputDevice]),
+            playbackController: StubPlaybackController(
+                startResults: [
+                    .playing(PlaybackProgress(elapsedSeconds: 37, durationSeconds: 182.5)),
+                ]
+            )
+        )
+
+        try await app.test(.router) { client in
+            var activeItemID = ""
+            for path in ["Intro.flac", "Second.wav"] {
+                try await client.execute(
+                    uri: "/api/playback-list/files",
+                    method: .post,
+                    body: ByteBufferAllocator().buffer(string: #"{"path":"\#(path)"}"#)
+                ) { response in
+                    try expect(response.status == .ok, "expected file add to succeed")
+
+                    if path == "Intro.flac" {
+                        let body = String(buffer: response.body)
+                        let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                        activeItemID = status.playbackList[0].itemId
+                    }
+                }
+            }
+            try await client.execute(
+                uri: "/api/devices/select",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"deviceId":"coreaudio:41"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected device select to succeed")
+            }
+            try await client.execute(uri: "/api/play", method: .post) { response in
+                try expect(response.status == .ok, "expected Play Command to start active entry")
+            }
+
+            try await client.execute(
+                uri: "/api/playback-list/delete",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"itemId":"\#(activeItemID)"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected active Now Playing delete to be represented as PlayerStatus")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackState == .playing, "expected protected Now Playing delete not to interrupt playback")
+                try expect(status.nowPlaying == "Intro.flac", "expected protected Now Playing to remain active")
+                try expect(status.playbackList.map(\.path) == ["Intro.flac", "Second.wav"], "expected protected Now Playing delete to leave Playback List unchanged")
+                try expect(status.progress == PlaybackProgress(elapsedSeconds: 37, durationSeconds: 182.5), "expected protected Now Playing delete to preserve progress")
+            }
+        }
+    }
+
+    static func clearPlaybackListWhenIdleRemovesEveryEntry() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        try Data().write(to: libraryRoot.appendingPathComponent("Intro.flac"))
+        try Data().write(to: libraryRoot.appendingPathComponent("Second.wav"))
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0
+        )
+
+        try await app.test(.router) { client in
+            for path in ["Intro.flac", "Second.wav"] {
+                try await client.execute(
+                    uri: "/api/playback-list/files",
+                    method: .post,
+                    body: ByteBufferAllocator().buffer(string: #"{"path":"\#(path)"}"#)
+                ) { response in
+                    try expect(response.status == .ok, "expected file add to succeed")
+                }
+            }
+
+            try await client.execute(uri: "/api/playback-list/clear", method: .post) { response in
+                try expect(response.status == .ok, "expected HTTP 200 from Playback List clear")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackState == .idle, "expected idle clear to keep idle Playback State")
+                try expect(status.nowPlaying == nil, "expected idle clear to have no Now Playing")
+                try expect(status.playbackList.isEmpty, "expected idle clear to remove every Playback List entry")
+            }
+        }
+    }
+
+    static func clearPlaybackListPreservesActiveNowPlaying() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        try Data().write(to: libraryRoot.appendingPathComponent("Intro.flac"))
+        try Data().write(to: libraryRoot.appendingPathComponent("Second.wav"))
+        let outputDevice = OutputDevice(id: "coreaudio:41", name: "USB DAC")
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0,
+            outputDeviceProvider: StubOutputDeviceProvider(devices: [outputDevice]),
+            playbackController: StubPlaybackController(
+                startResults: [
+                    .playing(PlaybackProgress(elapsedSeconds: 37, durationSeconds: 182.5)),
+                ]
+            )
+        )
+
+        try await app.test(.router) { client in
+            var activeItem = PlaybackListItem(itemId: "", path: "")
+            for path in ["Intro.flac", "Second.wav"] {
+                try await client.execute(
+                    uri: "/api/playback-list/files",
+                    method: .post,
+                    body: ByteBufferAllocator().buffer(string: #"{"path":"\#(path)"}"#)
+                ) { response in
+                    try expect(response.status == .ok, "expected file add to succeed")
+
+                    if path == "Intro.flac" {
+                        let body = String(buffer: response.body)
+                        let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                        activeItem = status.playbackList[0]
+                    }
+                }
+            }
+            try await client.execute(
+                uri: "/api/devices/select",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"deviceId":"coreaudio:41"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected device select to succeed")
+            }
+            try await client.execute(uri: "/api/play", method: .post) { response in
+                try expect(response.status == .ok, "expected Play Command to start active entry")
+            }
+
+            try await client.execute(uri: "/api/playback-list/clear", method: .post) { response in
+                try expect(response.status == .ok, "expected HTTP 200 from Playback List clear")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackState == .playing, "expected clear with Now Playing not to interrupt playback")
+                try expect(status.nowPlaying == "Intro.flac", "expected clear with Now Playing to retain Now Playing")
+                try expect(status.playbackList == [activeItem], "expected clear with Now Playing to preserve only the active runtime item")
+                try expect(status.progress == PlaybackProgress(elapsedSeconds: 37, durationSeconds: 182.5), "expected clear with Now Playing to preserve progress")
+            }
+        }
+    }
+
+    static func deletingEarlierEntryPreservesNowPlayingNavigation() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        for path in ["Intro.flac", "Second.wav", "Third.aiff"] {
+            try Data().write(to: libraryRoot.appendingPathComponent(path))
+        }
+        let outputDevice = OutputDevice(id: "coreaudio:41", name: "USB DAC")
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0,
+            outputDeviceProvider: StubOutputDeviceProvider(devices: [outputDevice]),
+            playbackController: StubPlaybackController(
+                startResults: [
+                    .playing(PlaybackProgress(elapsedSeconds: 0, durationSeconds: 205)),
+                    .playing(PlaybackProgress(elapsedSeconds: 0, durationSeconds: 220)),
+                ]
+            )
+        )
+
+        try await app.test(.router) { client in
+            var firstItemID = ""
+            var secondItemID = ""
+            for path in ["Intro.flac", "Second.wav", "Third.aiff"] {
+                try await client.execute(
+                    uri: "/api/playback-list/files",
+                    method: .post,
+                    body: ByteBufferAllocator().buffer(string: #"{"path":"\#(path)"}"#)
+                ) { response in
+                    try expect(response.status == .ok, "expected file add to succeed")
+
+                    let body = String(buffer: response.body)
+                    let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                    if path == "Intro.flac" {
+                        firstItemID = status.playbackList[0].itemId
+                    }
+                    if path == "Second.wav" {
+                        secondItemID = status.playbackList[1].itemId
+                    }
+                }
+            }
+            try await client.execute(
+                uri: "/api/devices/select",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"deviceId":"coreaudio:41"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected device select to succeed")
+            }
+            try await client.execute(
+                uri: "/api/playback-list/select",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"itemId":"\#(secondItemID)"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected Playback List Selection to start second entry")
+            }
+
+            try await client.execute(
+                uri: "/api/playback-list/delete",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: #"{"itemId":"\#(firstItemID)"}"#)
+            ) { response in
+                try expect(response.status == .ok, "expected deleting earlier entry to succeed")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackState == .playing, "expected deleting earlier entry not to interrupt playback")
+                try expect(status.nowPlaying == "Second.wav", "expected deleting earlier entry to retain Now Playing")
+                try expect(status.playbackList.map(\.path) == ["Second.wav", "Third.aiff"], "expected deleting earlier entry to update the live Playback List")
+            }
+
+            try await client.execute(uri: "/api/next", method: .post) { response in
+                try expect(response.status == .ok, "expected Next Command after list edit to succeed")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackState == .playing, "expected Next Command after list edit to keep playing")
+                try expect(status.nowPlaying == "Third.aiff", "expected Next Command after deleting earlier entry to use updated live position")
             }
         }
     }

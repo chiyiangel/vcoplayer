@@ -6,6 +6,7 @@ import App from './App'
 type MockPlayerStatus = {
   playbackState: 'idle' | 'playing' | 'paused' | 'stopped' | 'unsupported'
   nowPlaying: string | null
+  nowPlayingItemId: string | null
   playbackList: { itemId: string; path: string }[]
   selectedOutputDevice: { id: string; name: string } | null
   progress: { elapsedSeconds: number; durationSeconds: number | null } | null
@@ -31,6 +32,7 @@ type MockOutputDevice = {
 const idleStatus: MockPlayerStatus = {
   playbackState: 'idle',
   nowPlaying: null,
+  nowPlayingItemId: null,
   playbackList: [],
   selectedOutputDevice: null,
   progress: null,
@@ -56,6 +58,7 @@ const playingStatus: MockPlayerStatus = {
   ...statusWithOutputDevice,
   playbackState: 'playing',
   nowPlaying: 'Intro.flac',
+  nowPlayingItemId: 'item-1',
   playbackList: [{ itemId: 'item-1', path: 'Intro.flac' }],
   progress: { elapsedSeconds: 37, durationSeconds: 182.5 },
 }
@@ -70,6 +73,7 @@ const navigationStatus: MockPlayerStatus = {
   ...statusWithOutputDevice,
   playbackState: 'playing',
   nowPlaying: 'Intro.flac',
+  nowPlayingItemId: 'item-1',
   playbackList: [
     { itemId: 'item-1', path: 'Intro.flac' },
     { itemId: 'item-2', path: 'Second.wav' },
@@ -80,12 +84,14 @@ const navigationStatus: MockPlayerStatus = {
 const nextStatus: MockPlayerStatus = {
   ...navigationStatus,
   nowPlaying: 'Second.wav',
+  nowPlayingItemId: 'item-2',
   progress: { elapsedSeconds: 0, durationSeconds: 205 },
 }
 
 const previousStatus: MockPlayerStatus = {
   ...navigationStatus,
   nowPlaying: 'Intro.flac',
+  nowPlayingItemId: 'item-1',
   progress: { elapsedSeconds: 0, durationSeconds: 182.5 },
 }
 
@@ -93,6 +99,7 @@ const unsupportedStatus: MockPlayerStatus = {
   ...statusWithOutputDevice,
   playbackState: 'unsupported',
   nowPlaying: 'Lossy.m4a',
+  nowPlayingItemId: 'item-2',
   playbackList: [{ itemId: 'item-2', path: 'Lossy.m4a' }],
   progress: { elapsedSeconds: 5, durationSeconds: null },
   failureReason: 'Unsupported Playback: lossy m4a content cannot preserve Bit Perfect Playback.',
@@ -106,6 +113,16 @@ const statusWithIntro: MockPlayerStatus = {
 const statusWithAlbum: MockPlayerStatus = {
   ...idleStatus,
   playbackList: [{ itemId: 'item-2', path: 'Album/Track 01.wav' }],
+}
+
+const deletedSecondStatus: MockPlayerStatus = {
+  ...navigationStatus,
+  playbackList: [{ itemId: 'item-1', path: 'Intro.flac' }],
+}
+
+const clearedActiveStatus: MockPlayerStatus = {
+  ...navigationStatus,
+  playbackList: [{ itemId: 'item-1', path: 'Intro.flac' }],
 }
 
 const rootDirectory: MockLibraryDirectory = {
@@ -154,6 +171,12 @@ describe('Operator Remote initial status', () => {
         }
         if (url === '/api/playback-list/select' && init?.method === 'POST') {
           body = nextStatus
+        }
+        if (url === '/api/playback-list/delete' && init?.method === 'POST') {
+          body = deletedSecondStatus
+        }
+        if (url === '/api/playback-list/clear' && init?.method === 'POST') {
+          body = clearedActiveStatus
         }
         if (url === '/api/playback-list/files' && init?.method === 'POST') {
           body = statusWithIntro
@@ -289,6 +312,35 @@ describe('Operator Remote initial status', () => {
       method: 'POST',
       body: JSON.stringify({ itemId: 'item-2' }),
     })
+  })
+
+  test('supports Playback List delete and clear actions while protecting Now Playing', async () => {
+    const user = userEvent.setup()
+    currentStatus = navigationStatus
+
+    render(<App />)
+
+    const playbackList = await screen.findByRole('region', { name: '播放列表' })
+    expect(
+      (within(playbackList).getByRole('button', { name: '删除 Intro.flac' }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true)
+
+    await user.click(within(playbackList).getByRole('button', { name: '删除 Second.wav' }))
+
+    expect(screen.queryByText('Second.wav')).toBeNull()
+    expect(screen.getByLabelText('当前曲目').textContent).toBe('Intro.flac')
+    expect(fetch).toHaveBeenCalledWith('/api/playback-list/delete', {
+      method: 'POST',
+      body: JSON.stringify({ itemId: 'item-2' }),
+    })
+
+    await user.click(within(playbackList).getByRole('button', { name: '清空播放列表' }))
+
+    expect(screen.getByLabelText('当前曲目').textContent).toBe('Intro.flac')
+    expect(within(playbackList).getByText('Intro.flac')).toBeTruthy()
+    expect(within(playbackList).queryByText('Second.wav')).toBeNull()
+    expect(fetch).toHaveBeenCalledWith('/api/playback-list/clear', { method: 'POST' })
   })
 
   test('shows unknown duration and Playback Failure Reason from PlayerStatus', async () => {

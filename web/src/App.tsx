@@ -6,6 +6,7 @@ type PlaybackState = 'idle' | 'playing' | 'paused' | 'stopped' | 'unsupported'
 type PlayerStatus = {
   playbackState: PlaybackState
   nowPlaying: string | null
+  nowPlayingItemId: string | null
   playbackList: PlaybackListItem[]
   selectedOutputDevice: OutputDevice | null
   progress: PlaybackProgress | null
@@ -160,6 +161,23 @@ function App() {
     const response = await fetch('/api/playback-list/select', {
       method: 'POST',
       body: JSON.stringify({ itemId }),
+    })
+    const nextStatus = (await response.json()) as PlayerStatus
+    setStatus(nextStatus)
+  }
+
+  async function deletePlaybackListItem(itemId: string) {
+    const response = await fetch('/api/playback-list/delete', {
+      method: 'POST',
+      body: JSON.stringify({ itemId }),
+    })
+    const nextStatus = (await response.json()) as PlayerStatus
+    setStatus(nextStatus)
+  }
+
+  async function clearPlaybackList() {
+    const response = await fetch('/api/playback-list/clear', {
+      method: 'POST',
     })
     const nextStatus = (await response.json()) as PlayerStatus
     setStatus(nextStatus)
@@ -348,28 +366,57 @@ function App() {
           <section className="panel" aria-label="播放列表">
             <div className="panel-heading">
               <h2>播放列表</h2>
-              <span>{status?.playbackList.length ?? 0}</span>
+              <div className="panel-actions">
+                <span>{status?.playbackList.length ?? 0}</span>
+                <button
+                  type="button"
+                  className="secondary-action"
+                  disabled={!status?.playbackList.length}
+                  onClick={() => {
+                    void clearPlaybackList()
+                  }}
+                >
+                  清空播放列表
+                </button>
+              </div>
             </div>
             {status?.playbackList.length ? (
               <ol className="playback-list">
-                {status.playbackList.map((item) => (
-                  <li
-                    key={item.itemId}
-                    className={item.path === status.nowPlaying ? 'active' : undefined}
-                  >
-                    <span>{item.path}</span>
-                    <button
-                      type="button"
-                      className="secondary-action"
-                      aria-label={`播放 ${item.path}`}
-                      onClick={() => {
-                        void selectPlaybackListItem(item.itemId)
-                      }}
+                {status.playbackList.map((item) => {
+                  const isNowPlayingItem = item.itemId === status.nowPlayingItemId
+
+                  return (
+                    <li
+                      key={item.itemId}
+                      className={isNowPlayingItem ? 'active' : undefined}
                     >
-                      播放
-                    </button>
-                  </li>
-                ))}
+                      <span>{item.path}</span>
+                      <div className="playback-list-actions">
+                        <button
+                          type="button"
+                          className="secondary-action"
+                          aria-label={`播放 ${item.path}`}
+                          onClick={() => {
+                            void selectPlaybackListItem(item.itemId)
+                          }}
+                        >
+                          播放
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-action"
+                          aria-label={`删除 ${item.path}`}
+                          disabled={isNowPlayingItem}
+                          onClick={() => {
+                            void deletePlaybackListItem(item.itemId)
+                          }}
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </li>
+                  )
+                })}
               </ol>
             ) : (
               <p className="empty-state">播放列表为空</p>
