@@ -134,6 +134,10 @@ struct BackendTestRunner {
             print("PASS rejectsInvalidMusicLibraryRoot")
             try serveCommandUsesLocalOnlyDefaults()
             print("PASS serveCommandUsesLocalOnlyDefaults")
+            try readmeDocumentsImplementedRemoteApiShape()
+            print("PASS readmeDocumentsImplementedRemoteApiShape")
+            try readmeDocumentsManualMVPVerificationChecklist()
+            print("PASS readmeDocumentsManualMVPVerificationChecklist")
         } catch {
             fputs("FAIL \(error)\n", stderr)
             exit(1)
@@ -1740,5 +1744,51 @@ struct BackendTestRunner {
         try expect(command.host == "127.0.0.1", "expected local-only default host")
         try expect(command.port == 8080, "expected default API port")
         try command.validate()
+    }
+
+    static func readmeDocumentsImplementedRemoteApiShape() throws {
+        let readme = try String(contentsOfFile: "README.md", encoding: .utf8)
+        for endpoint in [
+            "GET /api/status",
+            "GET /api/devices",
+            "GET /api/library?path=...",
+            "POST /api/play",
+            "POST /api/pause",
+            "POST /api/next",
+            "POST /api/previous",
+            "POST /api/devices/select",
+            "POST /api/playback-list/files",
+            "POST /api/playback-list/folders",
+            "POST /api/playback-list/select",
+            "POST /api/playback-list/delete",
+            "POST /api/playback-list/clear",
+        ] {
+            try expect(readme.contains(endpoint), "expected README to document implemented endpoint \(endpoint)")
+        }
+
+        try expect(readme.contains("nowPlayingItemId"), "expected README to document Now Playing runtime identity in PlayerStatus")
+        try expect(!readme.contains("/api/playback-list/items/{itemId}"), "expected README not to document unimplemented item REST routes")
+        try expect(!readme.contains("polls `/api/status` once per second"), "expected README not to document unimplemented status polling")
+    }
+
+    static func readmeDocumentsManualMVPVerificationChecklist() throws {
+        let readme = try String(contentsOfFile: "README.md", encoding: .utf8)
+        for phrase in [
+            "Manual MVP Verification Checklist",
+            "real CoreAudio output",
+            "USB DAC playback",
+            "Bit Perfect failure behavior",
+            "output-device switching",
+            "device-busy failures",
+            "mobile layout",
+            "Phone testing",
+            "Playback List",
+            "Now Playing",
+            "Music Library Root",
+            "Operator Remote",
+            "Bit Perfect Playback",
+        ] {
+            try expect(readme.contains(phrase), "expected README manual verification docs to mention \(phrase)")
+        }
     }
 }

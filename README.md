@@ -63,7 +63,7 @@ The web UI displays read-only progress: current file, state, elapsed time, and d
 
 ## Output Devices
 
-Playback requires a selected local CoreAudio output device. The initial device may be provided by CLI, and the Operator Remote can change it at runtime. Device choice is not persisted.
+Playback requires a selected local CoreAudio output device. Use `swift run vcoplayer devices` to list devices, then select one in the Operator Remote after the server starts. Device choice is runtime-only and is not persisted.
 
 When the output device changes during active playback, the current stream stops and the current file restarts from the beginning on the new device if supported. If the new device cannot preserve Bit Perfect Playback for the file, playback enters the unsupported state.
 
@@ -71,30 +71,45 @@ The web UI lists selectable local output devices. Detailed format support is val
 
 ## HTTP API Shape
 
-The backend exposes REST/JSON under `/api/*`. It does not serve frontend assets, does not enable CORS by default, does not provide built-in HTTPS, and does not use WebSocket or server-sent events in the MVP.
+The backend exposes REST/JSON under `/api/*`. It does not serve frontend assets, does not enable CORS by default, does not provide built-in HTTPS, and does not use WebSocket or server-sent events in the MVP. The Vite development server proxies `/api` to `http://127.0.0.1:8080`.
 
-Expected query endpoints:
+`PlayerStatus` is the Remote API status shape returned by `GET /api/status` and by successful mutating commands:
 
-- `GET /api/status` returns playback state, Now Playing, the full Playback List, current device, read-only progress, runtime info, and any failure reason.
-- `GET /api/devices` lists local output devices.
-- `GET /api/library?path=...` browses a relative library path.
+- `playbackState`: `idle`, `playing`, `paused`, `stopped`, or `unsupported`.
+- `nowPlaying`: relative path for the current Now Playing file, or `null`.
+- `nowPlayingItemId`: runtime Playback List item ID for the current Now Playing entry, or `null`.
+- `playbackList`: ordered array of `{ "itemId": "...", "path": "..." }` entries.
+- `selectedOutputDevice`: `{ "id": "...", "name": "..." }`, or `null`.
+- `progress`: `{ "elapsedSeconds": 0, "durationSeconds": 123.4 }`, with `durationSeconds` allowed to be `null`.
+- `failureReason`: operator-readable failure text, or `null`.
+- `runtimeInfo`: `{ "musicLibraryRoot": "...", "serverHost": "...", "serverPort": 8080 }`.
 
-Expected command endpoints:
+Query endpoints:
 
-- `POST /api/play`
-- `POST /api/pause`
-- `POST /api/next`
-- `POST /api/previous`
-- `POST /api/devices/select`
-- `POST /api/playback-list/files`
-- `POST /api/playback-list/folders`
-- `POST /api/playback-list/items/{itemId}/play`
-- `DELETE /api/playback-list/items/{itemId}`
-- `DELETE /api/playback-list`
+| Endpoint | Response | Notes |
+| --- | --- | --- |
+| `GET /api/status` | `PlayerStatus` | Current playback state, Now Playing, Playback List, selected output device, progress, runtime info, and failure reason. |
+| `GET /api/devices` | `OutputDevice[]` | Selectable local CoreAudio output devices. |
+| `GET /api/library?path=...` | `LibraryDirectory` | Browse a path relative to the Music Library Root. Omit `path` for the root. |
 
-Mutating API calls return the latest `PlayerStatus` on success. Request errors return JSON shaped as `{ "code": "...", "message": "..." }`. Unsupported playback is a valid player state and should return status with `playbackState: "unsupported"` rather than a transport-level HTTP error.
+Command endpoints:
 
-The frontend polls `/api/status` once per second. Command responses update UI state immediately.
+| Endpoint | Body | Response |
+| --- | --- | --- |
+| `POST /api/play` | none | `PlayerStatus` |
+| `POST /api/pause` | none | `PlayerStatus` |
+| `POST /api/next` | none | `PlayerStatus` |
+| `POST /api/previous` | none | `PlayerStatus` |
+| `POST /api/devices/select` | `{ "deviceId": "coreaudio:..." }` | `PlayerStatus` |
+| `POST /api/playback-list/files` | `{ "path": "Album/Track.flac" }` | `PlayerStatus` |
+| `POST /api/playback-list/folders` | `{ "path": "Album" }` | `PlayerStatus` |
+| `POST /api/playback-list/select` | `{ "itemId": "..." }` | `PlayerStatus` |
+| `POST /api/playback-list/delete` | `{ "itemId": "..." }` | `PlayerStatus` |
+| `POST /api/playback-list/clear` | none | `PlayerStatus` |
+
+Request errors return JSON shaped as `{ "code": "...", "message": "..." }`. Unsupported playback is a valid player state and returns status with `playbackState: "unsupported"` rather than a transport-level HTTP error.
+
+The Operator Remote loads `/api/status` and `/api/devices` on first render. Command responses update UI state immediately; the MVP has no background polling or realtime push.
 
 ## Frontend
 
@@ -107,15 +122,16 @@ The MVP does not include user accounts, roles, sessions, multi-user conflict han
 
 ## Development
 
-Planned repository structure:
+Repository structure:
 
 ```text
 .
 ├── Package.swift
 ├── Sources/
+│   ├── VCOPlayerCore/
 │   └── vcoplayer/
 ├── Tests/
-│   └── vcoplayerTests/
+│   └── vcoplayerBackendTests/
 ├── web/
 │   ├── package.json
 │   └── src/
@@ -139,13 +155,46 @@ npm install
 npm run dev
 ```
 
-For phone testing on the local network, run the Vite dev server with a LAN bind such as `--host 0.0.0.0` and start the backend with an explicit LAN bind. The backend defaults to local-only access.
+Open the Operator Remote at `http://127.0.0.1:5173/`. Keep both processes running. The proxy in `web/vite.config.ts` forwards `/api` requests from Vite to the backend at `http://127.0.0.1:8080`.
+
+Phone testing on the local network:
+
+```sh
+ipconfig getifaddr en0
+cd web
+npm run dev -- --host 0.0.0.0
+```
+
+With the backend still running on `127.0.0.1:8080`, open `http://<mac-lan-ip>:5173/` on a phone connected to the same Wi-Fi network. The phone talks to Vite, and Vite forwards `/api` to the local backend process on the Mac. If you need to call the Remote API directly from another device, start the backend with a LAN bind instead:
+
+```sh
+swift run vcoplayer serve --library ~/Music --host 0.0.0.0 --port 8080
+```
+
+The backend defaults to local-only access, and macOS firewall settings can still block LAN testing.
 
 ## Testing
 
-- Backend automated tests currently run through `swift run vcoplayerBackendTests` because the available Command Line Tools Swift installation does not include XCTest. These tests cover public behavior such as Remote API status, Music Library Root validation, and Server CLI parsing.
-- Frontend automated tests use Vitest for API client behavior, state logic, and key component interactions.
-- Real CoreAudio output, USB DAC behavior, Bit Perfect playback, device switching, and mobile layout are manually verified for the MVP.
+Automated verification:
+
+```sh
+swift run vcoplayerBackendTests
+cd web
+npm test
+npm run lint
+npm run build
+```
+
+Backend automated tests currently run through `swift run vcoplayerBackendTests` because the available Command Line Tools Swift installation does not include XCTest. These tests cover public behavior such as Remote API status, Music Library Root validation, Server CLI parsing, Playback List commands, output-device selection, and README/API documentation drift. Frontend automated tests use Vitest for API client behavior, state logic, and key component interactions.
+
+Manual MVP Verification Checklist:
+
+- real CoreAudio output: start the backend, select a built-in Mac output device in the Operator Remote, add a known-good WAV, FLAC, AIFF, or ALAC file from the Music Library Root to the Playback List, and verify play, pause, next, previous, elapsed time, duration, Now Playing, and no unexpected failure reason.
+- USB DAC playback: connect a USB DAC, confirm it appears in `swift run vcoplayer devices` and `GET /api/devices`, select it in the Operator Remote, then verify Playback List playback starts on that device without falling back to another output.
+- Bit Perfect failure behavior: use a known unsupported file or output path such as AAC-in-M4A or a device/format combination that cannot preserve the source format; verify playback enters `unsupported`, the Operator Remote shows the failure reason, and no software conversion or fallback output is used.
+- output-device switching: while a supported file is playing, switch to another selectable output device and verify the current Now Playing file restarts from the beginning on the new device; if the new device cannot preserve Bit Perfect Playback, verify the state becomes `unsupported`.
+- device-busy failures: make a selected device unavailable or busy, attempt playback or switch to it, and verify `failureReason` is visible, `selectedOutputDevice` reflects the attempted device, and the player does not silently choose another output.
+- mobile layout: run the Phone testing workflow, open the Operator Remote on a phone, and verify the `播放` and `资料库` views fit without overlapping controls, allow browsing the Music Library Root, adding folders/files, selecting/deleting Playback List entries, clearing the Playback List, selecting an output device, and reading any Bit Perfect Playback failure reason.
 
 ## Decision Records
 
