@@ -19,6 +19,7 @@ public struct RuntimeInfo: Codable, Equatable, Sendable {
 public struct PlayerStatus: ResponseCodable, Equatable, Sendable {
     public let playbackState: PlaybackState
     public let nowPlaying: String?
+    public let nowPlayingItemId: String?
     public let playbackList: [PlaybackListItem]
     public let selectedOutputDevice: OutputDevice?
     public let progress: PlaybackProgress?
@@ -161,6 +162,17 @@ public func buildApplication(
                 )
             )
         }
+        Post("/api/playback-list/delete") { request, context in
+            let deleteRequest = try await request.decode(as: PlaybackListDeleteRequest.self, context: context)
+            return PlaybackListMutationResponse.status(
+                await playerState.deletePlaybackListItem(itemID: deleteRequest.itemId)
+            )
+        }
+        Post("/api/playback-list/clear") { _, _ in
+            PlaybackListMutationResponse.status(
+                await playerState.clearPlaybackList()
+            )
+        }
         Post("/api/devices/select") { request, context in
             let selectionRequest = try await request.decode(as: OutputDeviceSelectionRequest.self, context: context)
             guard let outputDevice = try outputDeviceProvider.outputDevices().first(where: { $0.id == selectionRequest.deviceId }) else {
@@ -198,6 +210,10 @@ private struct PlaybackListSelectionRequest: Decodable {
     let itemId: String
 }
 
+private struct PlaybackListDeleteRequest: Decodable {
+    let itemId: String
+}
+
 private actor PlayerStateStore {
     private var playbackList: [PlaybackListItem] = []
     private var selectedOutputDevice: OutputDevice?
@@ -215,6 +231,7 @@ private actor PlayerStateStore {
         PlayerStatus(
             playbackState: self.playbackState,
             nowPlaying: self.nowPlayingIndex.map { self.playbackList[$0].path },
+            nowPlayingItemId: self.nowPlayingIndex.map { self.playbackList[$0].itemId },
             playbackList: self.playbackList,
             selectedOutputDevice: self.selectedOutputDevice,
             progress: self.progress,
@@ -233,6 +250,34 @@ private actor PlayerStateStore {
                 PlaybackListItem(itemId: UUID().uuidString, path: path)
             )
         }
+        return self.status()
+    }
+
+    func deletePlaybackListItem(itemID: String) -> PlayerStatus {
+        guard let itemIndex = self.playbackList.firstIndex(where: { $0.itemId == itemID }) else {
+            return self.status()
+        }
+        if itemIndex == self.nowPlayingIndex {
+            return self.status()
+        }
+
+        self.playbackList.remove(at: itemIndex)
+        if let nowPlayingIndex = self.nowPlayingIndex, itemIndex < nowPlayingIndex {
+            self.nowPlayingIndex = nowPlayingIndex - 1
+        }
+        return self.status()
+    }
+
+    func clearPlaybackList() -> PlayerStatus {
+        if let nowPlayingIndex = self.nowPlayingIndex {
+            let nowPlayingItem = self.playbackList[nowPlayingIndex]
+            self.playbackList = [nowPlayingItem]
+            self.nowPlayingIndex = 0
+            return self.status()
+        }
+
+        self.playbackList.removeAll()
+        self.nowPlayingIndex = nil
         return self.status()
     }
 
