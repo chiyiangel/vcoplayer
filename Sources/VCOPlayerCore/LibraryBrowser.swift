@@ -87,6 +87,80 @@ func browseLibraryDirectory(libraryRoot: URL, relativePath: String) throws -> Li
     return LibraryDirectory(path: relativePath, folders: folders, files: files)
 }
 
+func resolveCandidateMusicFile(libraryRoot: URL, relativePath: String) throws -> String {
+    try validateLibraryRelativePath(relativePath)
+
+    let resolvedLibraryRoot = libraryRoot.resolvingSymlinksInPath().standardizedFileURL
+    let fileURL = libraryRoot.appendingPathComponent(relativePath, isDirectory: false)
+    try validateResolvedLibraryBoundary(resolvedLibraryRoot: resolvedLibraryRoot, candidateURL: fileURL)
+
+    let values = try fileURL.resourceValues(forKeys: [.isDirectoryKey])
+    guard values.isDirectory != true else {
+        throw LibraryPathError.invalid
+    }
+    guard candidateMusicFileExtensions.contains(fileURL.pathExtension.lowercased()) else {
+        throw LibraryPathError.invalid
+    }
+
+    return relativePath
+}
+
+func collectCandidateMusicFiles(libraryRoot: URL, relativePath: String) throws -> [String] {
+    try validateLibraryRelativePath(relativePath)
+
+    let resolvedLibraryRoot = libraryRoot.resolvingSymlinksInPath().standardizedFileURL
+    let directoryURL = libraryRoot.appendingPathComponent(relativePath, isDirectory: true)
+    try validateResolvedLibraryBoundary(resolvedLibraryRoot: resolvedLibraryRoot, candidateURL: directoryURL)
+
+    let values = try directoryURL.resourceValues(forKeys: [.isDirectoryKey])
+    guard values.isDirectory == true else {
+        throw LibraryPathError.invalid
+    }
+
+    var candidatePaths: [String] = []
+    try collectCandidateMusicFiles(
+        from: directoryURL,
+        relativePath: relativePath,
+        resolvedLibraryRoot: resolvedLibraryRoot,
+        into: &candidatePaths
+    )
+    return candidatePaths.sorted {
+        $0.localizedStandardCompare($1) == .orderedAscending
+    }
+}
+
+private func collectCandidateMusicFiles(
+    from directoryURL: URL,
+    relativePath: String,
+    resolvedLibraryRoot: URL,
+    into candidatePaths: inout [String]
+) throws {
+    let entries = try FileManager.default.contentsOfDirectory(
+        at: directoryURL,
+        includingPropertiesForKeys: [.isDirectoryKey],
+        options: []
+    )
+
+    for entry in entries {
+        guard isResolvedURL(entry, insideOrEqualTo: resolvedLibraryRoot) else {
+            continue
+        }
+
+        let entryPath = joinLibraryPath(relativePath, entry.lastPathComponent)
+        let values = try entry.resourceValues(forKeys: [.isDirectoryKey])
+        if values.isDirectory == true {
+            try collectCandidateMusicFiles(
+                from: entry,
+                relativePath: entryPath,
+                resolvedLibraryRoot: resolvedLibraryRoot,
+                into: &candidatePaths
+            )
+        } else if candidateMusicFileExtensions.contains(entry.pathExtension.lowercased()) {
+            candidatePaths.append(entryPath)
+        }
+    }
+}
+
 private func validateLibraryRelativePath(_ relativePath: String) throws {
     guard !relativePath.hasPrefix("/") else {
         throw LibraryPathError.invalid

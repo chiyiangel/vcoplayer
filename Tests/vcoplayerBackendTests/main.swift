@@ -25,6 +25,12 @@ struct BackendTestRunner {
         do {
             try await statusReturnsIdlePlayerStatusForValidMusicLibraryRoot()
             print("PASS statusReturnsIdlePlayerStatusForValidMusicLibraryRoot")
+            try await addCandidateMusicFileAppendsPlaybackListItem()
+            print("PASS addCandidateMusicFileAppendsPlaybackListItem")
+            try await addCandidateMusicFileCreatesDistinctRuntimeItemsForDuplicates()
+            print("PASS addCandidateMusicFileCreatesDistinctRuntimeItemsForDuplicates")
+            try await folderAddAppendsNestedCandidateMusicFilesInStableRelativePathOrder()
+            print("PASS folderAddAppendsNestedCandidateMusicFilesInStableRelativePathOrder")
             try await libraryBrowserReturnsRootFoldersAndCandidateMusicFiles()
             print("PASS libraryBrowserReturnsRootFoldersAndCandidateMusicFiles")
             try await libraryBrowserAcceptsRootRelativeSubfolderPaths()
@@ -68,6 +74,105 @@ struct BackendTestRunner {
                 let body = String(buffer: response.body)
                 let directory = try JSONDecoder().decode(LibraryDirectory.self, from: Data(body.utf8))
                 try expect(directory.files.map(\.name) == ["01.flac", "02.wav", "03.aiff", "04.aif", "05.m4a"], "expected only MVP Candidate Music File formats")
+            }
+        }
+    }
+
+    static func folderAddAppendsNestedCandidateMusicFilesInStableRelativePathOrder() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let albumURL = libraryRoot.appendingPathComponent("Album", isDirectory: true)
+        try FileManager.default.createDirectory(at: albumURL.appendingPathComponent("Disc 1"), withIntermediateDirectories: true)
+        try Data().write(to: albumURL.appendingPathComponent("Beta.wav"))
+        try Data().write(to: albumURL.appendingPathComponent("Alpha.aif"))
+        try Data().write(to: albumURL.appendingPathComponent("Notes.txt"))
+        try Data().write(to: albumURL.appendingPathComponent("Disc 1").appendingPathComponent("01.flac"))
+        try Data().write(to: albumURL.appendingPathComponent("Disc 1").appendingPathComponent("Cover.jpg"))
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0
+        )
+
+        try await app.test(.router) { client in
+            let body = ByteBufferAllocator().buffer(string: #"{"path":"Album"}"#)
+            try await client.execute(uri: "/api/playback-list/folders", method: .post, body: body) { response in
+                try expect(response.status == .ok, "expected HTTP 200 from Folder Add endpoint")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(
+                    status.playbackList.map(\.path) == [
+                        "Album/Alpha.aif",
+                        "Album/Beta.wav",
+                        "Album/Disc 1/01.flac",
+                    ],
+                    "expected Folder Add to append nested Candidate Music Files in stable relative-path order"
+                )
+            }
+        }
+    }
+
+    static func addCandidateMusicFileCreatesDistinctRuntimeItemsForDuplicates() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        try Data().write(to: libraryRoot.appendingPathComponent("Repeat.m4a"))
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0
+        )
+
+        try await app.test(.router) { client in
+            let body = #"{"path":"Repeat.m4a"}"#
+            try await client.execute(
+                uri: "/api/playback-list/files",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: body)
+            ) { response in
+                try expect(response.status == .ok, "expected first duplicate add to succeed")
+            }
+
+            try await client.execute(
+                uri: "/api/playback-list/files",
+                method: .post,
+                body: ByteBufferAllocator().buffer(string: body)
+            ) { response in
+                try expect(response.status == .ok, "expected second duplicate add to succeed")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackList.map(\.path) == ["Repeat.m4a", "Repeat.m4a"], "expected duplicate file paths to be retained")
+                try expect(status.playbackList[0].itemId != status.playbackList[1].itemId, "expected duplicate entries to have distinct runtime identities")
+            }
+        }
+    }
+
+    static func addCandidateMusicFileAppendsPlaybackListItem() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        try Data().write(to: libraryRoot.appendingPathComponent("Intro.flac"))
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0
+        )
+
+        try await app.test(.router) { client in
+            let body = ByteBufferAllocator().buffer(string: #"{"path":"Intro.flac"}"#)
+            try await client.execute(uri: "/api/playback-list/files", method: .post, body: body) { response in
+                try expect(response.status == .ok, "expected HTTP 200 from file add endpoint")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.playbackList.count == 1, "expected one Playback List entry")
+                try expect(status.playbackList[0].path == "Intro.flac", "expected Playback List entry to use root-relative file path")
+                try expect(!status.playbackList[0].itemId.isEmpty, "expected Playback List entry to have runtime identity")
             }
         }
     }

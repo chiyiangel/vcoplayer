@@ -134,6 +134,10 @@ h2 {
 }
 
 .library-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
   min-height: 44px;
   width: 100%;
   padding: 10px 12px;
@@ -142,6 +146,17 @@ h2 {
   background: #ffffff;
   color: #18202a;
   font: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.library-name-action {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
   text-align: left;
   overflow-wrap: anywhere;
 }

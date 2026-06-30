@@ -19,10 +19,20 @@ public struct RuntimeInfo: Codable, Equatable, Sendable {
 public struct PlayerStatus: ResponseCodable, Equatable, Sendable {
     public let playbackState: PlaybackState
     public let nowPlaying: String?
-    public let playbackList: [String]
+    public let playbackList: [PlaybackListItem]
     public let selectedOutputDevice: String?
     public let failureReason: String?
     public let runtimeInfo: RuntimeInfo
+}
+
+public struct PlaybackListItem: Codable, Equatable, Sendable {
+    public let itemId: String
+    public let path: String
+
+    public init(itemId: String, path: String) {
+        self.itemId = itemId
+        self.path = path
+    }
 }
 
 public struct RequestError: ResponseCodable, Equatable, Sendable {
@@ -53,12 +63,7 @@ public func buildApplication(
 ) throws -> some ApplicationProtocol {
     try validateMusicLibraryRoot(libraryRoot)
 
-    let status = PlayerStatus(
-        playbackState: .idle,
-        nowPlaying: nil,
-        playbackList: [],
-        selectedOutputDevice: nil,
-        failureReason: nil,
+    let playerState = PlayerStateStore(
         runtimeInfo: RuntimeInfo(
             musicLibraryRoot: libraryRoot.path,
             serverHost: host,
@@ -68,7 +73,7 @@ public func buildApplication(
 
     let router = RouterBuilder(context: BasicRouterRequestContext.self) {
         Get("/api/status") { _, _ in
-            status
+            await playerState.status()
         }
         Get("/api/library") { request, _ in
             let relativePath = request.uri.queryParameters["path"].map(String.init) ?? ""
@@ -85,6 +90,38 @@ public func buildApplication(
                 )
             }
         }
+        Post("/api/playback-list/files") { request, context in
+            do {
+                let pathRequest = try await request.decode(as: LibraryPathRequest.self, context: context)
+                let filePath = try resolveCandidateMusicFile(libraryRoot: libraryRoot, relativePath: pathRequest.path)
+                return PlaybackListMutationResponse.status(
+                    await playerState.addFile(path: filePath)
+                )
+            } catch LibraryPathError.invalid {
+                return PlaybackListMutationResponse.requestError(
+                    RequestError(
+                        code: "invalid_library_path",
+                        message: "Playback List additions must use a Candidate Music File inside the Music Library Root."
+                    )
+                )
+            }
+        }
+        Post("/api/playback-list/folders") { request, context in
+            do {
+                let pathRequest = try await request.decode(as: LibraryPathRequest.self, context: context)
+                let filePaths = try collectCandidateMusicFiles(libraryRoot: libraryRoot, relativePath: pathRequest.path)
+                return PlaybackListMutationResponse.status(
+                    await playerState.addFiles(paths: filePaths)
+                )
+            } catch LibraryPathError.invalid {
+                return PlaybackListMutationResponse.requestError(
+                    RequestError(
+                        code: "invalid_library_path",
+                        message: "Folder Add must use a directory inside the Music Library Root."
+                    )
+                )
+            }
+        }
     }
 
     return Application(
@@ -96,6 +133,43 @@ public func buildApplication(
     )
 }
 
+private struct LibraryPathRequest: Decodable {
+    let path: String
+}
+
+private actor PlayerStateStore {
+    private var playbackList: [PlaybackListItem] = []
+    private let runtimeInfo: RuntimeInfo
+
+    init(runtimeInfo: RuntimeInfo) {
+        self.runtimeInfo = runtimeInfo
+    }
+
+    func status() -> PlayerStatus {
+        PlayerStatus(
+            playbackState: .idle,
+            nowPlaying: nil,
+            playbackList: self.playbackList,
+            selectedOutputDevice: nil,
+            failureReason: nil,
+            runtimeInfo: self.runtimeInfo
+        )
+    }
+
+    func addFile(path: String) -> PlayerStatus {
+        self.addFiles(paths: [path])
+    }
+
+    func addFiles(paths: [String]) -> PlayerStatus {
+        for path in paths {
+            self.playbackList.append(
+                PlaybackListItem(itemId: UUID().uuidString, path: path)
+            )
+        }
+        return self.status()
+    }
+}
+
 private enum LibraryBrowserResponse: ResponseGenerator {
     case directory(LibraryDirectory)
     case requestError(RequestError)
@@ -104,6 +178,22 @@ private enum LibraryBrowserResponse: ResponseGenerator {
         switch self {
         case .directory(let directory):
             return try directory.response(from: request, context: context)
+        case .requestError(let requestError):
+            var response = try requestError.response(from: request, context: context)
+            response.status = .badRequest
+            return response
+        }
+    }
+}
+
+private enum PlaybackListMutationResponse: ResponseGenerator {
+    case status(PlayerStatus)
+    case requestError(RequestError)
+
+    func response(from request: Request, context: some RequestContext) throws -> Response {
+        switch self {
+        case .status(let status):
+            return try status.response(from: request, context: context)
         case .requestError(let requestError):
             var response = try requestError.response(from: request, context: context)
             response.status = .badRequest
