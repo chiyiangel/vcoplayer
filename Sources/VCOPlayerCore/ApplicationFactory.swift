@@ -20,7 +20,7 @@ public struct PlayerStatus: ResponseCodable, Equatable, Sendable {
     public let playbackState: PlaybackState
     public let nowPlaying: String?
     public let playbackList: [PlaybackListItem]
-    public let selectedOutputDevice: String?
+    public let selectedOutputDevice: OutputDevice?
     public let failureReason: String?
     public let runtimeInfo: RuntimeInfo
 }
@@ -59,7 +59,8 @@ public enum MusicLibraryRootError: Error, CustomStringConvertible, Equatable {
 public func buildApplication(
     libraryRoot: URL,
     host: String,
-    port: Int
+    port: Int,
+    outputDeviceProvider: any OutputDeviceProviding = CoreAudioOutputDeviceProvider()
 ) throws -> some ApplicationProtocol {
     try validateMusicLibraryRoot(libraryRoot)
 
@@ -74,6 +75,9 @@ public func buildApplication(
     let router = RouterBuilder(context: BasicRouterRequestContext.self) {
         Get("/api/status") { _, _ in
             await playerState.status()
+        }
+        Get("/api/devices") { _, _ in
+            try outputDeviceProvider.outputDevices()
         }
         Get("/api/library") { request, _ in
             let relativePath = request.uri.queryParameters["path"].map(String.init) ?? ""
@@ -122,6 +126,20 @@ public func buildApplication(
                 )
             }
         }
+        Post("/api/devices/select") { request, context in
+            let selectionRequest = try await request.decode(as: OutputDeviceSelectionRequest.self, context: context)
+            guard let outputDevice = try outputDeviceProvider.outputDevices().first(where: { $0.id == selectionRequest.deviceId }) else {
+                return PlaybackListMutationResponse.requestError(
+                    RequestError(
+                        code: "invalid_output_device",
+                        message: "Playback Output Device is not selectable."
+                    )
+                )
+            }
+            return PlaybackListMutationResponse.status(
+                await playerState.selectOutputDevice(outputDevice)
+            )
+        }
     }
 
     return Application(
@@ -137,8 +155,13 @@ private struct LibraryPathRequest: Decodable {
     let path: String
 }
 
+private struct OutputDeviceSelectionRequest: Decodable {
+    let deviceId: String
+}
+
 private actor PlayerStateStore {
     private var playbackList: [PlaybackListItem] = []
+    private var selectedOutputDevice: OutputDevice?
     private let runtimeInfo: RuntimeInfo
 
     init(runtimeInfo: RuntimeInfo) {
@@ -150,7 +173,7 @@ private actor PlayerStateStore {
             playbackState: .idle,
             nowPlaying: nil,
             playbackList: self.playbackList,
-            selectedOutputDevice: nil,
+            selectedOutputDevice: self.selectedOutputDevice,
             failureReason: nil,
             runtimeInfo: self.runtimeInfo
         )
@@ -166,6 +189,11 @@ private actor PlayerStateStore {
                 PlaybackListItem(itemId: UUID().uuidString, path: path)
             )
         }
+        return self.status()
+    }
+
+    func selectOutputDevice(_ outputDevice: OutputDevice) -> PlayerStatus {
+        self.selectedOutputDevice = outputDevice
         return self.status()
     }
 }

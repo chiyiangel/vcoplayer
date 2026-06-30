@@ -5,10 +5,29 @@ public struct VCOPlayerCommand: AsyncParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "vcoplayer",
         abstract: "Headless macOS music player remote server.",
-        subcommands: [ServeCommand.self]
+        subcommands: [ServeCommand.self, DevicesCommand.self]
     )
 
     public init() {}
+}
+
+public struct DevicesCommand: ParsableCommand {
+    public static let configuration = CommandConfiguration(
+        commandName: "devices",
+        abstract: "List local audio output devices."
+    )
+
+    public init() {}
+
+    public mutating func run() throws {
+        print(try Self.output(deviceProvider: CoreAudioOutputDeviceProvider()))
+    }
+
+    public static func output(deviceProvider: any OutputDeviceProviding) throws -> String {
+        try deviceProvider.outputDevices()
+            .map { "\($0.id)\t\($0.name)" }
+            .joined(separator: "\n")
+    }
 }
 
 public struct ServeCommand: AsyncParsableCommand {

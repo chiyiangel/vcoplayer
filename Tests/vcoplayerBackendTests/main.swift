@@ -19,12 +19,28 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
     }
 }
 
+struct StubOutputDeviceProvider: OutputDeviceProviding {
+    let devices: [OutputDevice]
+
+    func outputDevices() throws -> [OutputDevice] {
+        self.devices
+    }
+}
+
 @main
 struct BackendTestRunner {
     static func main() async {
         do {
             try await statusReturnsIdlePlayerStatusForValidMusicLibraryRoot()
             print("PASS statusReturnsIdlePlayerStatusForValidMusicLibraryRoot")
+            try await devicesEndpointReturnsSelectableOutputDevices()
+            print("PASS devicesEndpointReturnsSelectableOutputDevices")
+            try await selectOutputDeviceUpdatesPlayerStatusForCurrentServerRun()
+            print("PASS selectOutputDeviceUpdatesPlayerStatusForCurrentServerRun")
+            try await selectedOutputDeviceIsNotPersistedAcrossServerRuns()
+            print("PASS selectedOutputDeviceIsNotPersistedAcrossServerRuns")
+            try devicesCommandFormatsOutputDeviceListFromProvider()
+            print("PASS devicesCommandFormatsOutputDeviceListFromProvider")
             try await addCandidateMusicFileAppendsPlaybackListItem()
             print("PASS addCandidateMusicFileAppendsPlaybackListItem")
             try await addCandidateMusicFileCreatesDistinctRuntimeItemsForDuplicates()
@@ -74,6 +90,127 @@ struct BackendTestRunner {
                 let body = String(buffer: response.body)
                 let directory = try JSONDecoder().decode(LibraryDirectory.self, from: Data(body.utf8))
                 try expect(directory.files.map(\.name) == ["01.flac", "02.wav", "03.aiff", "04.aif", "05.m4a"], "expected only MVP Candidate Music File formats")
+            }
+        }
+    }
+
+    static func devicesCommandFormatsOutputDeviceListFromProvider() throws {
+        let output = try DevicesCommand.output(
+            deviceProvider: StubOutputDeviceProvider(devices: [
+                OutputDevice(id: "coreaudio:41", name: "USB DAC"),
+                OutputDevice(id: "coreaudio:55", name: "Built-in Output"),
+            ])
+        )
+
+        try expect(
+            output == """
+            coreaudio:41\tUSB DAC
+            coreaudio:55\tBuilt-in Output
+            """,
+            "expected Server CLI devices output to include stable identifiers and names"
+        )
+    }
+
+    static func selectedOutputDeviceIsNotPersistedAcrossServerRuns() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        let outputDevice = OutputDevice(id: "coreaudio:41", name: "USB DAC")
+        let outputDeviceProvider = StubOutputDeviceProvider(devices: [outputDevice])
+
+        let firstApp = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0,
+            outputDeviceProvider: outputDeviceProvider
+        )
+
+        try await firstApp.test(.router) { client in
+            let body = ByteBufferAllocator().buffer(string: #"{"deviceId":"coreaudio:41"}"#)
+            try await client.execute(uri: "/api/devices/select", method: .post, body: body) { response in
+                try expect(response.status == .ok, "expected device select to succeed")
+            }
+        }
+
+        let nextApp = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0,
+            outputDeviceProvider: outputDeviceProvider
+        )
+
+        try await nextApp.test(.router) { client in
+            try await client.execute(uri: "/api/status", method: .get) { response in
+                try expect(response.status == .ok, "expected HTTP 200 from /api/status")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.selectedOutputDevice == nil, "expected Playback Output Device selection to be runtime-only")
+            }
+        }
+    }
+
+    static func selectOutputDeviceUpdatesPlayerStatusForCurrentServerRun() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        let outputDevice = OutputDevice(id: "coreaudio:41", name: "USB DAC")
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0,
+            outputDeviceProvider: StubOutputDeviceProvider(devices: [outputDevice])
+        )
+
+        try await app.test(.router) { client in
+            let body = ByteBufferAllocator().buffer(string: #"{"deviceId":"coreaudio:41"}"#)
+            try await client.execute(uri: "/api/devices/select", method: .post, body: body) { response in
+                try expect(response.status == .ok, "expected HTTP 200 from device select endpoint")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.selectedOutputDevice == outputDevice, "expected selected Playback Output Device in command response")
+            }
+
+            try await client.execute(uri: "/api/status", method: .get) { response in
+                try expect(response.status == .ok, "expected HTTP 200 from /api/status")
+
+                let body = String(buffer: response.body)
+                let status = try JSONDecoder().decode(PlayerStatus.self, from: Data(body.utf8))
+                try expect(status.selectedOutputDevice == outputDevice, "expected selected Playback Output Device to be runtime state")
+            }
+        }
+    }
+
+    static func devicesEndpointReturnsSelectableOutputDevices() async throws {
+        let libraryRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+
+        let app = try buildApplication(
+            libraryRoot: libraryRoot,
+            host: "127.0.0.1",
+            port: 0,
+            outputDeviceProvider: StubOutputDeviceProvider(devices: [
+                OutputDevice(id: "coreaudio:41", name: "USB DAC"),
+                OutputDevice(id: "coreaudio:55", name: "Built-in Output"),
+            ])
+        )
+
+        try await app.test(.router) { client in
+            try await client.execute(uri: "/api/devices", method: .get) { response in
+                try expect(response.status == .ok, "expected HTTP 200 from /api/devices")
+
+                let body = String(buffer: response.body)
+                let devices = try JSONDecoder().decode([OutputDevice].self, from: Data(body.utf8))
+                try expect(
+                    devices == [
+                        OutputDevice(id: "coreaudio:41", name: "USB DAC"),
+                        OutputDevice(id: "coreaudio:55", name: "Built-in Output"),
+                    ],
+                    "expected selectable Playback Output Devices from provider"
+                )
             }
         }
     }

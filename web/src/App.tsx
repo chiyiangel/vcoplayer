@@ -7,7 +7,7 @@ type PlayerStatus = {
   playbackState: PlaybackState
   nowPlaying: string | null
   playbackList: PlaybackListItem[]
-  selectedOutputDevice: string | null
+  selectedOutputDevice: OutputDevice | null
   failureReason: string | null
   runtimeInfo: {
     musicLibraryRoot: string
@@ -19,6 +19,11 @@ type PlayerStatus = {
 type PlaybackListItem = {
   itemId: string
   path: string
+}
+
+type OutputDevice = {
+  id: string
+  name: string
 }
 
 type LibraryEntry = {
@@ -44,6 +49,7 @@ const playbackStateText: Record<PlaybackState, string> = {
 
 function App() {
   const [status, setStatus] = useState<PlayerStatus | null>(null)
+  const [outputDevices, setOutputDevices] = useState<OutputDevice[] | null>(null)
   const [activeView, setActiveView] = useState<MainView>('playback')
   const [libraryDirectory, setLibraryDirectory] = useState<LibraryDirectory | null>(null)
 
@@ -58,7 +64,16 @@ function App() {
       }
     }
 
+    async function loadOutputDevices() {
+      const response = await fetch('/api/devices')
+      const nextDevices = (await response.json()) as OutputDevice[]
+      if (!cancelled) {
+        setOutputDevices(nextDevices)
+      }
+    }
+
     void loadStatus()
+    void loadOutputDevices()
 
     return () => {
       cancelled = true
@@ -93,6 +108,15 @@ function App() {
     setStatus(nextStatus)
   }
 
+  async function selectOutputDevice(deviceId: string) {
+    const response = await fetch('/api/devices/select', {
+      method: 'POST',
+      body: JSON.stringify({ deviceId }),
+    })
+    const nextStatus = (await response.json()) as PlayerStatus
+    setStatus(nextStatus)
+  }
+
   async function addLibraryFolder(path: string) {
     const response = await fetch('/api/playback-list/folders', {
       method: 'POST',
@@ -101,6 +125,22 @@ function App() {
     const nextStatus = (await response.json()) as PlayerStatus
     setStatus(nextStatus)
   }
+
+  const selectableOutputDevices = outputDevices ?? []
+  const selectedOutputDevice = status?.selectedOutputDevice ?? null
+  const outputDevicesLoaded = outputDevices !== null
+  const selectedOutputDeviceMissing = Boolean(
+    outputDevicesLoaded &&
+      selectedOutputDevice &&
+      !selectableOutputDevices.some((device) => device.id === selectedOutputDevice.id),
+  )
+  const outputDeviceMissingText = !outputDevicesLoaded
+    ? null
+    : selectableOutputDevices.length === 0
+      ? '未发现输出设备'
+      : selectedOutputDeviceMissing
+        ? '已选择的输出设备不在当前设备列表中'
+        : null
 
   return (
     <main className="remote-shell">
@@ -145,8 +185,45 @@ function App() {
           <section className="panel" aria-label="输出设备">
             <div className="status-row">
               <span>输出设备</span>
-              <strong>{status?.selectedOutputDevice ?? '未选择输出设备'}</strong>
+              <strong aria-label="当前输出设备">
+                {selectedOutputDevice?.name ?? '未选择输出设备'}
+              </strong>
             </div>
+            <label className="field-row">
+              <span>输出设备</span>
+              <select
+                value={selectedOutputDevice?.id ?? ''}
+                disabled={!outputDevicesLoaded || selectableOutputDevices.length === 0}
+                onChange={(event) => {
+                  if (event.target.value) {
+                    void selectOutputDevice(event.target.value)
+                  }
+                }}
+              >
+                <option value="">
+                  {!outputDevicesLoaded
+                    ? '加载输出设备'
+                    : selectableOutputDevices.length
+                      ? '选择输出设备'
+                      : '无可选输出设备'}
+                </option>
+                {selectedOutputDeviceMissing && selectedOutputDevice ? (
+                  <option value={selectedOutputDevice.id} disabled>
+                    {selectedOutputDevice.name} (不可用)
+                  </option>
+                ) : null}
+                {selectableOutputDevices.map((device) => (
+                  <option key={device.id} value={device.id}>
+                    {device.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {outputDeviceMissingText ? (
+              <p className="empty-state device-alert" aria-label="输出设备缺失状态">
+                {outputDeviceMissingText}
+              </p>
+            ) : null}
           </section>
 
           <section className="panel" aria-label="播放列表">
