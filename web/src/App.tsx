@@ -8,6 +8,7 @@ type PlayerStatus = {
   nowPlaying: string | null
   playbackList: PlaybackListItem[]
   selectedOutputDevice: OutputDevice | null
+  progress: PlaybackProgress | null
   failureReason: string | null
   runtimeInfo: {
     musicLibraryRoot: string
@@ -24,6 +25,11 @@ type PlaybackListItem = {
 type OutputDevice = {
   id: string
   name: string
+}
+
+type PlaybackProgress = {
+  elapsedSeconds: number
+  durationSeconds: number | null
 }
 
 type LibraryEntry = {
@@ -45,6 +51,16 @@ const playbackStateText: Record<PlaybackState, string> = {
   paused: '已暂停',
   stopped: '已停止',
   unsupported: '不支持',
+}
+
+function formatPlaybackTime(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return '00:00'
+  }
+  const wholeSeconds = Math.floor(seconds)
+  const minutes = Math.floor(wholeSeconds / 60)
+  const remainingSeconds = wholeSeconds % 60
+  return `${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`
 }
 
 function App() {
@@ -103,6 +119,22 @@ function App() {
     const response = await fetch('/api/playback-list/files', {
       method: 'POST',
       body: JSON.stringify({ path }),
+    })
+    const nextStatus = (await response.json()) as PlayerStatus
+    setStatus(nextStatus)
+  }
+
+  async function play() {
+    const response = await fetch('/api/play', {
+      method: 'POST',
+    })
+    const nextStatus = (await response.json()) as PlayerStatus
+    setStatus(nextStatus)
+  }
+
+  async function pause() {
+    const response = await fetch('/api/pause', {
+      method: 'POST',
     })
     const nextStatus = (await response.json()) as PlayerStatus
     setStatus(nextStatus)
@@ -178,7 +210,45 @@ function App() {
             </div>
             <div className="now-playing">
               <span>当前曲目</span>
-              <strong>{status?.nowPlaying ?? '无'}</strong>
+              <strong aria-label="当前曲目">{status?.nowPlaying ?? '无'}</strong>
+            </div>
+            {status?.failureReason ? (
+              <p className="failure-reason">{status.failureReason}</p>
+            ) : null}
+          </section>
+
+          <section className="panel" aria-label="播放控制">
+            <div className="transport-actions">
+              <button
+                type="button"
+                className="primary-action"
+                onClick={() => {
+                  void play()
+                }}
+              >
+                播放
+              </button>
+              <button
+                type="button"
+                className="secondary-action"
+                onClick={() => {
+                  void pause()
+                }}
+              >
+                暂停
+              </button>
+            </div>
+            <div className="progress-grid">
+              <span>已播放</span>
+              <strong aria-label="已播放时间">
+                {formatPlaybackTime(status?.progress?.elapsedSeconds ?? 0)}
+              </strong>
+              <span>总时长</span>
+              <strong aria-label="总时长">
+                {status?.progress?.durationSeconds == null
+                  ? '未知'
+                  : formatPlaybackTime(status.progress.durationSeconds)}
+              </strong>
             </div>
           </section>
 

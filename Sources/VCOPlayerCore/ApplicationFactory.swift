@@ -21,6 +21,7 @@ public struct PlayerStatus: ResponseCodable, Equatable, Sendable {
     public let nowPlaying: String?
     public let playbackList: [PlaybackListItem]
     public let selectedOutputDevice: OutputDevice?
+    public let progress: PlaybackProgress?
     public let failureReason: String?
     public let runtimeInfo: RuntimeInfo
 }
@@ -45,6 +46,8 @@ public struct RequestError: ResponseCodable, Equatable, Sendable {
     }
 }
 
+private let missingOutputDeviceFailureReason = "Playback requires a selected Playback Output Device."
+
 public enum MusicLibraryRootError: Error, CustomStringConvertible, Equatable {
     case notDirectory(String)
 
@@ -60,7 +63,8 @@ public func buildApplication(
     libraryRoot: URL,
     host: String,
     port: Int,
-    outputDeviceProvider: any OutputDeviceProviding = CoreAudioOutputDeviceProvider()
+    outputDeviceProvider: any OutputDeviceProviding = CoreAudioOutputDeviceProvider(),
+    playbackController: any PlaybackControlling = CoreAudioPlaybackController()
 ) throws -> some ApplicationProtocol {
     try validateMusicLibraryRoot(libraryRoot)
 
@@ -75,6 +79,16 @@ public func buildApplication(
     let router = RouterBuilder(context: BasicRouterRequestContext.self) {
         Get("/api/status") { _, _ in
             await playerState.status()
+        }
+        Post("/api/play") { _, _ in
+            PlaybackListMutationResponse.status(
+                await playerState.play(libraryRoot: libraryRoot, playbackController: playbackController)
+            )
+        }
+        Post("/api/pause") { _, _ in
+            PlaybackListMutationResponse.status(
+                await playerState.pause(playbackController: playbackController)
+            )
         }
         Get("/api/devices") { _, _ in
             try outputDeviceProvider.outputDevices()
@@ -162,6 +176,10 @@ private struct OutputDeviceSelectionRequest: Decodable {
 private actor PlayerStateStore {
     private var playbackList: [PlaybackListItem] = []
     private var selectedOutputDevice: OutputDevice?
+    private var playbackState = PlaybackState.idle
+    private var nowPlayingIndex: Int?
+    private var progress: PlaybackProgress?
+    private var failureReason: String?
     private let runtimeInfo: RuntimeInfo
 
     init(runtimeInfo: RuntimeInfo) {
@@ -170,11 +188,12 @@ private actor PlayerStateStore {
 
     func status() -> PlayerStatus {
         PlayerStatus(
-            playbackState: .idle,
-            nowPlaying: nil,
+            playbackState: self.playbackState,
+            nowPlaying: self.nowPlayingIndex.map { self.playbackList[$0].path },
             playbackList: self.playbackList,
             selectedOutputDevice: self.selectedOutputDevice,
-            failureReason: nil,
+            progress: self.progress,
+            failureReason: self.failureReason,
             runtimeInfo: self.runtimeInfo
         )
     }
@@ -194,6 +213,61 @@ private actor PlayerStateStore {
 
     func selectOutputDevice(_ outputDevice: OutputDevice) -> PlayerStatus {
         self.selectedOutputDevice = outputDevice
+        if self.playbackState == .unsupported,
+           self.nowPlayingIndex == nil,
+           self.failureReason == missingOutputDeviceFailureReason {
+            self.playbackState = .idle
+            self.failureReason = nil
+        }
+        return self.status()
+    }
+
+    func play(libraryRoot: URL, playbackController: any PlaybackControlling) async -> PlayerStatus {
+        guard let outputDevice = self.selectedOutputDevice else {
+            self.playbackState = .unsupported
+            self.failureReason = missingOutputDeviceFailureReason
+            return self.status()
+        }
+        guard !self.playbackList.isEmpty else {
+            return self.status()
+        }
+
+        let playbackIndex = self.nowPlayingIndex ?? 0
+        let item = self.playbackList[playbackIndex]
+        let resumeAtSeconds = self.playbackState == .paused ? self.progress?.elapsedSeconds : nil
+        let result = await playbackController.start(
+            PlaybackStartRequest(
+                fileURL: libraryRoot.appendingPathComponent(item.path),
+                relativePath: item.path,
+                outputDevice: outputDevice,
+                resumeAtSeconds: resumeAtSeconds
+            )
+        )
+
+        switch result {
+        case .playing(let progress):
+            self.nowPlayingIndex = playbackIndex
+            self.playbackState = .playing
+            self.progress = progress
+            self.failureReason = nil
+        case .unsupported(let failureReason):
+            self.nowPlayingIndex = playbackIndex
+            self.playbackState = .unsupported
+            self.progress = nil
+            self.failureReason = failureReason
+        }
+        return self.status()
+    }
+
+    func pause(playbackController: any PlaybackControlling) async -> PlayerStatus {
+        guard self.playbackState == .playing, self.nowPlayingIndex != nil else {
+            return self.status()
+        }
+
+        let pauseResult = await playbackController.pause()
+        self.playbackState = .paused
+        self.progress = pauseResult.progress
+        self.failureReason = nil
         return self.status()
     }
 }
