@@ -1,14 +1,15 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import App from './App'
 
 type MockPlayerStatus = {
-  playbackState: 'idle'
-  nowPlaying: null
+  playbackState: 'idle' | 'playing' | 'paused' | 'stopped' | 'unsupported'
+  nowPlaying: string | null
   playbackList: { itemId: string; path: string }[]
   selectedOutputDevice: { id: string; name: string } | null
-  failureReason: null
+  progress: { elapsedSeconds: number; durationSeconds: number | null } | null
+  failureReason: string | null
   runtimeInfo: {
     musicLibraryRoot: string
     serverHost: string
@@ -32,6 +33,7 @@ const idleStatus: MockPlayerStatus = {
   nowPlaying: null,
   playbackList: [],
   selectedOutputDevice: null,
+  progress: null,
   failureReason: null,
   runtimeInfo: {
     musicLibraryRoot: '/Users/me/Music',
@@ -48,6 +50,29 @@ const outputDevices: MockOutputDevice[] = [
 const statusWithOutputDevice: MockPlayerStatus = {
   ...idleStatus,
   selectedOutputDevice: outputDevices[0],
+}
+
+const playingStatus: MockPlayerStatus = {
+  ...statusWithOutputDevice,
+  playbackState: 'playing',
+  nowPlaying: 'Intro.flac',
+  playbackList: [{ itemId: 'item-1', path: 'Intro.flac' }],
+  progress: { elapsedSeconds: 37, durationSeconds: 182.5 },
+}
+
+const pausedStatus: MockPlayerStatus = {
+  ...playingStatus,
+  playbackState: 'paused',
+  progress: { elapsedSeconds: 42, durationSeconds: 182.5 },
+}
+
+const unsupportedStatus: MockPlayerStatus = {
+  ...statusWithOutputDevice,
+  playbackState: 'unsupported',
+  nowPlaying: 'Lossy.m4a',
+  playbackList: [{ itemId: 'item-2', path: 'Lossy.m4a' }],
+  progress: { elapsedSeconds: 5, durationSeconds: null },
+  failureReason: 'Unsupported Playback: lossy m4a content cannot preserve Bit Perfect Playback.',
 }
 
 const statusWithIntro: MockPlayerStatus = {
@@ -92,6 +117,12 @@ describe('Operator Remote initial status', () => {
         if (url === '/api/devices/select' && init?.method === 'POST') {
           body = statusWithOutputDevice
         }
+        if (url === '/api/play' && init?.method === 'POST') {
+          body = playingStatus
+        }
+        if (url === '/api/pause' && init?.method === 'POST') {
+          body = pausedStatus
+        }
         if (url === '/api/playback-list/files' && init?.method === 'POST') {
           body = statusWithIntro
         }
@@ -120,8 +151,9 @@ describe('Operator Remote initial status', () => {
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: '播放' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '播放' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '资料库' })).toBeTruthy()
+    const mainViews = screen.getByRole('navigation', { name: '主视图' })
+    expect(within(mainViews).getByRole('button', { name: '播放' })).toBeTruthy()
+    expect(within(mainViews).getByRole('button', { name: '资料库' })).toBeTruthy()
     expect(screen.getByText('空闲')).toBeTruthy()
     expect(screen.getByText('播放列表为空')).toBeTruthy()
     expect(screen.getByLabelText('当前输出设备').textContent).toBe('未选择输出设备')
@@ -166,6 +198,39 @@ describe('Operator Remote initial status', () => {
     expect((await screen.findByLabelText('当前输出设备')).textContent).toBe('未选择输出设备')
     expect(screen.getByLabelText('输出设备缺失状态').textContent).toBe('未发现输出设备')
     expect((screen.getByRole('combobox', { name: '输出设备' }) as HTMLSelectElement).disabled).toBe(true)
+  })
+
+  test('shows Playback Controls and read-only progress from Play and Pause commands', async () => {
+    const user = userEvent.setup()
+
+    render(<App />)
+
+    const controls = await screen.findByRole('region', { name: '播放控制' })
+    await user.click(within(controls).getByRole('button', { name: '播放' }))
+
+    expect(screen.getByText('播放中')).toBeTruthy()
+    expect(screen.getByLabelText('当前曲目').textContent).toBe('Intro.flac')
+    expect(screen.getByLabelText('已播放时间').textContent).toBe('00:37')
+    expect(screen.getByLabelText('总时长').textContent).toBe('03:02')
+    expect(fetch).toHaveBeenCalledWith('/api/play', { method: 'POST' })
+
+    await user.click(within(controls).getByRole('button', { name: '暂停' }))
+
+    expect(screen.getByText('已暂停')).toBeTruthy()
+    expect(screen.getByLabelText('已播放时间').textContent).toBe('00:42')
+    expect(fetch).toHaveBeenCalledWith('/api/pause', { method: 'POST' })
+  })
+
+  test('shows unknown duration and Playback Failure Reason from PlayerStatus', async () => {
+    currentStatus = unsupportedStatus
+
+    render(<App />)
+
+    expect(await screen.findByText('不支持')).toBeTruthy()
+    expect(screen.getByLabelText('当前曲目').textContent).toBe('Lossy.m4a')
+    expect(screen.getByLabelText('已播放时间').textContent).toBe('00:05')
+    expect(screen.getByLabelText('总时长').textContent).toBe('未知')
+    expect(screen.getByText('Unsupported Playback: lossy m4a content cannot preserve Bit Perfect Playback.')).toBeTruthy()
   })
 
   test('renders the Library Browser root from the Remote API', async () => {
