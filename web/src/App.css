@@ -109,6 +109,53 @@ h2 {
   margin-top: 8px;
 }
 
+.panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.secondary-action {
+  min-height: 34px;
+  border: 1px solid #b7c2cf;
+  border-radius: 8px;
+  background: #f7fafc;
+  color: #263240;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.library-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.library-row {
+  min-height: 44px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #d9e0e8;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #18202a;
+  font: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.folder-row {
+  border-color: #a9bed4;
+  background: #f7fbff;
+  font-weight: 700;
+}
+
+.file-row {
+  color: #344455;
+}
+
 .empty-state {
   margin-top: 12px;
   color: #607080;
