@@ -42,6 +42,7 @@ public struct PlaybackPauseResult: Equatable, Sendable {
 public protocol PlaybackControlling: Sendable {
     func start(_ request: PlaybackStartRequest) async -> PlaybackStartResult
     func pause() async -> PlaybackPauseResult
+    func stop() async
 }
 
 public actor CoreAudioPlaybackController: PlaybackControlling {
@@ -63,6 +64,10 @@ public actor CoreAudioPlaybackController: PlaybackControlling {
                 )
             )
         }
+
+        self.player?.stop()
+        self.player = nil
+        self.durationSeconds = nil
 
         do {
             let inspection = try Self.inspectAudioFile(request.fileURL)
@@ -108,6 +113,12 @@ public actor CoreAudioPlaybackController: PlaybackControlling {
                 durationSeconds: self.durationSeconds
             )
         )
+    }
+
+    public func stop() async {
+        self.player?.stop()
+        self.player = nil
+        self.durationSeconds = nil
     }
 
     private static func coreAudioDeviceUID(from outputDevice: OutputDevice) -> String {

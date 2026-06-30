@@ -140,6 +140,31 @@ function App() {
     setStatus(nextStatus)
   }
 
+  async function next() {
+    const response = await fetch('/api/next', {
+      method: 'POST',
+    })
+    const nextStatus = (await response.json()) as PlayerStatus
+    setStatus(nextStatus)
+  }
+
+  async function previous() {
+    const response = await fetch('/api/previous', {
+      method: 'POST',
+    })
+    const nextStatus = (await response.json()) as PlayerStatus
+    setStatus(nextStatus)
+  }
+
+  async function selectPlaybackListItem(itemId: string) {
+    const response = await fetch('/api/playback-list/select', {
+      method: 'POST',
+      body: JSON.stringify({ itemId }),
+    })
+    const nextStatus = (await response.json()) as PlayerStatus
+    setStatus(nextStatus)
+  }
+
   async function selectOutputDevice(deviceId: string) {
     const response = await fetch('/api/devices/select', {
       method: 'POST',
@@ -173,6 +198,10 @@ function App() {
       : selectedOutputDeviceMissing
         ? '已选择的输出设备不在当前设备列表中'
         : null
+  const isPlaying = status?.playbackState === 'playing'
+  const isPaused = status?.playbackState === 'paused'
+  const playButtonClassName = isPlaying ? 'primary-action' : 'secondary-action'
+  const pauseButtonClassName = isPaused ? 'primary-action' : 'secondary-action'
 
   return (
     <main className="remote-shell">
@@ -221,7 +250,17 @@ function App() {
             <div className="transport-actions">
               <button
                 type="button"
-                className="primary-action"
+                className="secondary-action"
+                onClick={() => {
+                  void previous()
+                }}
+              >
+                上一首
+              </button>
+              <button
+                type="button"
+                className={playButtonClassName}
+                aria-pressed={isPlaying}
                 onClick={() => {
                   void play()
                 }}
@@ -230,12 +269,22 @@ function App() {
               </button>
               <button
                 type="button"
-                className="secondary-action"
+                className={pauseButtonClassName}
+                aria-pressed={isPaused}
                 onClick={() => {
                   void pause()
                 }}
               >
                 暂停
+              </button>
+              <button
+                type="button"
+                className="secondary-action"
+                onClick={() => {
+                  void next()
+                }}
+              >
+                下一首
               </button>
             </div>
             <div className="progress-grid">
@@ -304,7 +353,22 @@ function App() {
             {status?.playbackList.length ? (
               <ol className="playback-list">
                 {status.playbackList.map((item) => (
-                  <li key={item.itemId}>{item.path}</li>
+                  <li
+                    key={item.itemId}
+                    className={item.path === status.nowPlaying ? 'active' : undefined}
+                  >
+                    <span>{item.path}</span>
+                    <button
+                      type="button"
+                      className="secondary-action"
+                      aria-label={`播放 ${item.path}`}
+                      onClick={() => {
+                        void selectPlaybackListItem(item.itemId)
+                      }}
+                    >
+                      播放
+                    </button>
+                  </li>
                 ))}
               </ol>
             ) : (
