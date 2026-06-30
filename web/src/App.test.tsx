@@ -3,7 +3,26 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import App from './App'
 
-const idleStatus = {
+type MockPlayerStatus = {
+  playbackState: 'idle'
+  nowPlaying: null
+  playbackList: { itemId: string; path: string }[]
+  selectedOutputDevice: null
+  failureReason: null
+  runtimeInfo: {
+    musicLibraryRoot: string
+    serverHost: string
+    serverPort: number
+  }
+}
+
+type MockLibraryDirectory = {
+  path: string
+  folders: { name: string; path: string }[]
+  files: { name: string; path: string }[]
+}
+
+const idleStatus: MockPlayerStatus = {
   playbackState: 'idle',
   nowPlaying: null,
   playbackList: [],
@@ -16,13 +35,23 @@ const idleStatus = {
   },
 }
 
-const rootDirectory = {
+const statusWithIntro: MockPlayerStatus = {
+  ...idleStatus,
+  playbackList: [{ itemId: 'item-1', path: 'Intro.flac' }],
+}
+
+const statusWithAlbum: MockPlayerStatus = {
+  ...idleStatus,
+  playbackList: [{ itemId: 'item-2', path: 'Album/Track 01.wav' }],
+}
+
+const rootDirectory: MockLibraryDirectory = {
   path: '',
   folders: [{ name: 'Album', path: 'Album' }],
   files: [{ name: 'Intro.flac', path: 'Intro.flac' }],
 }
 
-const albumDirectory = {
+const albumDirectory: MockLibraryDirectory = {
   path: 'Album',
   folders: [],
   files: [{ name: 'Track 01.wav', path: 'Album/Track 01.wav' }],
@@ -35,9 +64,15 @@ describe('Operator Remote initial status', () => {
     currentRootDirectory = rootDirectory
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input)
-        let body: typeof idleStatus | typeof rootDirectory | typeof albumDirectory = idleStatus
+        let body: MockPlayerStatus | MockLibraryDirectory = idleStatus
+        if (url === '/api/playback-list/files' && init?.method === 'POST') {
+          body = statusWithIntro
+        }
+        if (url === '/api/playback-list/folders' && init?.method === 'POST') {
+          body = statusWithAlbum
+        }
         if (url === '/api/library') {
           body = currentRootDirectory
         }
@@ -79,6 +114,36 @@ describe('Operator Remote initial status', () => {
     expect(screen.getByRole('button', { name: 'Album' })).toBeTruthy()
     expect(screen.getByText('Intro.flac')).toBeTruthy()
     expect(fetch).toHaveBeenCalledWith('/api/library')
+  })
+
+  test('adds a Library Browser file and shows the updated Playback List', async () => {
+    const user = userEvent.setup()
+
+    render(<App />)
+    await user.click(screen.getByRole('button', { name: '资料库' }))
+    await user.click(await screen.findByRole('button', { name: '添加 Intro.flac' }))
+    await user.click(screen.getByRole('button', { name: '播放' }))
+
+    expect(screen.getByText('Intro.flac')).toBeTruthy()
+    expect(fetch).toHaveBeenCalledWith('/api/playback-list/files', {
+      method: 'POST',
+      body: JSON.stringify({ path: 'Intro.flac' }),
+    })
+  })
+
+  test('adds a Library Browser folder and shows the updated Playback List', async () => {
+    const user = userEvent.setup()
+
+    render(<App />)
+    await user.click(screen.getByRole('button', { name: '资料库' }))
+    await user.click(await screen.findByRole('button', { name: '添加 Album' }))
+    await user.click(screen.getByRole('button', { name: '播放' }))
+
+    expect(screen.getByText('Album/Track 01.wav')).toBeTruthy()
+    expect(fetch).toHaveBeenCalledWith('/api/playback-list/folders', {
+      method: 'POST',
+      body: JSON.stringify({ path: 'Album' }),
+    })
   })
 
   test('refreshes the visible Library Browser directory on demand', async () => {

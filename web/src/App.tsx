@@ -6,7 +6,7 @@ type PlaybackState = 'idle' | 'playing' | 'paused' | 'stopped' | 'unsupported'
 type PlayerStatus = {
   playbackState: PlaybackState
   nowPlaying: string | null
-  playbackList: string[]
+  playbackList: PlaybackListItem[]
   selectedOutputDevice: string | null
   failureReason: string | null
   runtimeInfo: {
@@ -14,6 +14,11 @@ type PlayerStatus = {
     serverHost: string
     serverPort: number
   }
+}
+
+type PlaybackListItem = {
+  itemId: string
+  path: string
 }
 
 type LibraryEntry = {
@@ -79,6 +84,24 @@ function App() {
     return lastSeparator === -1 ? '' : path.slice(0, lastSeparator)
   }
 
+  async function addLibraryFile(path: string) {
+    const response = await fetch('/api/playback-list/files', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    })
+    const nextStatus = (await response.json()) as PlayerStatus
+    setStatus(nextStatus)
+  }
+
+  async function addLibraryFolder(path: string) {
+    const response = await fetch('/api/playback-list/folders', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    })
+    const nextStatus = (await response.json()) as PlayerStatus
+    setStatus(nextStatus)
+  }
+
   return (
     <main className="remote-shell">
       <header className="remote-header">
@@ -133,8 +156,8 @@ function App() {
             </div>
             {status?.playbackList.length ? (
               <ol className="playback-list">
-                {status.playbackList.map((item, index) => (
-                  <li key={`${item}-${index}`}>{item}</li>
+                {status.playbackList.map((item) => (
+                  <li key={item.itemId}>{item.path}</li>
                 ))}
               </ol>
             ) : (
@@ -185,20 +208,39 @@ function App() {
           {libraryDirectory ? (
             <div className="library-list">
               {libraryDirectory.folders.map((folder) => (
-                <button
-                  key={folder.path}
-                  type="button"
-                  className="library-row folder-row"
-                  onClick={() => {
-                    void loadLibrary(folder.path)
-                  }}
-                >
-                  {folder.name}
-                </button>
+                <div key={folder.path} className="library-row folder-row">
+                  <button
+                    type="button"
+                    className="library-name-action"
+                    onClick={() => {
+                      void loadLibrary(folder.path)
+                    }}
+                  >
+                    {folder.name}
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-action"
+                    onClick={() => {
+                      void addLibraryFolder(folder.path)
+                    }}
+                  >
+                    添加 {folder.name}
+                  </button>
+                </div>
               ))}
               {libraryDirectory.files.map((file) => (
                 <div key={file.path} className="library-row file-row">
-                  {file.name}
+                  <span>{file.name}</span>
+                  <button
+                    type="button"
+                    className="secondary-action"
+                    onClick={() => {
+                      void addLibraryFile(file.path)
+                    }}
+                  >
+                    添加 {file.name}
+                  </button>
                 </div>
               ))}
               {!libraryDirectory.folders.length && !libraryDirectory.files.length ? (
